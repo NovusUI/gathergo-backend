@@ -1,0 +1,368 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum RegistrationType {
+  ticket
+  registration
+}
+
+enum TransactionStatusType {
+  SUCCESS
+  PENDING
+  FAILED
+}
+
+model User {
+  id                   String                 @id @default(uuid())
+  email                String                 @unique
+  fullName             String?
+  username             String?                @unique
+  password             String? // Optional for Google users
+  googleId             String?                @unique
+  profilePicUrl        String?
+  profilePicUrlTN      String?
+  bio                  String?
+  birthDate            DateTime?
+  gender               Gender?
+  nationality          String?
+  phoneNumber          String?
+  isProfileComplete    Boolean                @default(false)
+  hasPreferences       Boolean                @default(false)
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime?              @updatedAt
+  resetToken           String?
+  resetTokenExpiry     DateTime?
+  // Relations
+  followedBy           UserFollow[]           @relation("Following")
+  following            UserFollow[]           @relation("Follower")
+  communityFollows     CommunityFollow[]
+  communities          Community[]
+  eventsCreated        Event[]                @relation("UserEvents")
+  preference           UserPreference?
+  isVerified           Boolean                @default(false)
+  Ticket               Ticket[]
+  TransactionReference TransactionReference[]
+
+  Carpool          Carpool[]
+  CarpoolPassenger CarpoolPassenger[]
+
+  DeviceToken           DeviceToken[]
+  Message               Message[]
+  readMessages          Message[]      @relation("MessageReadBy")
+  sentNotifications     Notification[] @relation("NotificationSender")
+  receivedNotifications Notification[] @relation("NotificationRecipient")
+
+  postsMentions     Post[]         @relation("PostMentions")
+  commentsMentioned Comment[]      @relation("CommentMentions")
+  Like              Like[]
+  Post              Post[]
+  Comment           Comment[]
+  Registration      Registration[]
+}
+
+model UserPreference {
+  id           String   @id @default(uuid())
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id])
+  eventTypes   String[] // array of strings
+  interests    String[]
+  location     String?
+  primaryUsage String?
+}
+
+model UserFollow {
+  id          String @id @default(uuid())
+  followerId  String
+  followingId String
+
+  follower  User @relation("Follower", fields: [followerId], references: [id])
+  following User @relation("Following", fields: [followingId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@unique([followerId, followingId])
+}
+
+model Community {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  bannerUrl   String?
+  avatarUrl   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  events      Event[]  @relation("CommunityEvents")
+  ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id])
+
+  communityFollows CommunityFollow[]
+  Post             Post[]
+}
+
+model CommunityFollow {
+  id          String @id @default(uuid())
+  userId      String
+  communityId String
+
+  user      User      @relation(fields: [userId], references: [id])
+  community Community @relation(fields: [communityId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, communityId])
+}
+
+enum Reoccurring {
+  NONE
+  DAILY
+  WEEKLY
+}
+
+model Event {
+  id                    String           @id @default(uuid())
+  title                 String
+  description           String?
+  imageUrl              String?
+  thumbnailUrl          String?
+  location              String?
+  links                 String[]
+  startDate             DateTime
+  endDate               DateTime
+  endRepeat             DateTime?
+  reoccurring           Reoccurring      @default(NONE)
+  communityId           String?
+  community             Community?       @relation("CommunityEvents", fields: [communityId], references: [id])
+  creatorId             String
+  creator               User             @relation("UserEvents", fields: [creatorId], references: [id])
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+  tags                  String[]
+  eventTickets          EventTicket[]
+  carpools              Carpool[]
+  Post                  Post[]
+  EventTrend            EventTrend[]
+  registrationType      RegistrationType
+  registrationAttendees Int?
+  registrationFee       Int?
+  Registration          Registration[]
+}
+
+model EventTicket {
+  id          String   @id @default(uuid())
+  eventId     String
+  event       Event    @relation(fields: [eventId], references: [id])
+  type        String // e.g., VIP, Regular
+  description String // new field for additional details
+  price       Float
+  quantity    Int // Total tickets available
+  perks       String[]
+  sold        Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  isVisible   Boolean  @default(true)
+  tickets     Ticket[]
+  updatedPrice Float?
+}
+
+model Ticket {
+  id            String      @id @default(uuid())
+  userId        String
+  user          User        @relation(fields: [userId], references: [id])
+  eventTicketId String
+  eventTicket   EventTicket @relation(fields: [eventTicketId], references: [id])
+  status        String      @default("active") // active, canceled, used, etc.
+  createdAt     DateTime    @default(now())
+  qrCode        String      @unique
+  isUsed        Boolean     @default(false)
+  transactionId String
+}
+
+model Registration {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  status        String   @default("active") // active, canceled, used, etc.
+  createdAt     DateTime @default(now())
+  qrCode        String   @unique
+  isUsed        Boolean  @default(false)
+  transactionId String
+  eventId       String
+  event         Event    @relation(fields: [eventId], references: [id])
+}
+
+model TransactionReference {
+  id        String                @id @default(uuid())
+  userId    String
+  user      User                  @relation(fields: [userId], references: [id])
+  amount    Int
+  status    TransactionStatusType @default(PENDING)
+  createdAt DateTime              @default(now())
+  updatedAt DateTime              @updatedAt
+  metadata  Json
+}
+
+model Carpool {
+  id             String             @id @default(uuid())
+  driverId       String
+  driver         User               @relation(fields: [driverId], references: [id])
+  eventId        String? // <-- optional
+  event          Event?             @relation(fields: [eventId], references: [id])
+  origin         String
+  destination    String
+  departureTime  DateTime
+  availableSeats Int                @default(1)
+  pricePerSeat   Float              @default(0)
+  description    String?
+  status         String             @default("ACTIVE")
+  passengers     CarpoolPassenger[]
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  isDeleted      Boolean            @default(false)
+  latitude       Float?
+  longitude      Float?
+  destLatitude   Float?
+  destLongitude  Float?
+  expiresAt      DateTime           @default(now())
+  Message        Message[]
+}
+
+model CarpoolPassenger {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  carpoolId   String
+  carpool     Carpool   @relation(fields: [carpoolId], references: [id])
+  status      String    @default("PENDING") // PENDING, ACCEPTED, DECLINED
+  joinedAt    DateTime?
+  requestedAt DateTime  @default(now())
+  updatedAt   DateTime?
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  type      String // e.g., 'friend_request', 'message', 'system'
+  title     String
+  message   String
+  imageUrl  String?
+  link      String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relationships
+  recipient   User   @relation(name: "NotificationRecipient", fields: [recipientId], references: [id])
+  recipientId String
+
+  sender   User?   @relation(name: "NotificationSender", fields: [senderId], references: [id])
+  senderId String?
+
+  // Indexes
+  @@index([recipientId])
+  @@index([senderId])
+  @@index([createdAt])
+  @@index([read])
+}
+
+model DeviceToken {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+model Message {
+  id        String   @id @default(uuid())
+  carpoolId String
+  carpool   Carpool  @relation(fields: [carpoolId], references: [id])
+  senderId  String
+  sender    User     @relation(fields: [senderId], references: [id])
+  content   String
+  createdAt DateTime @default(now())
+  isDeleted Boolean  @default(false)
+  readBy    User[]   @relation("MessageReadBy")
+}
+
+model Post {
+  id            String     @id @default(cuid())
+  creator       User       @relation(fields: [creatorId], references: [id])
+  creatorId     String
+  event         Event?     @relation(fields: [eventId], references: [id])
+  eventId       String?
+  community     Community? @relation(fields: [communityId], references: [id])
+  communityId   String?
+  type          PostType
+  content       String?
+  mediaUrls     String[]
+  pollOptions   String[] // optional, if type == POLL
+  isPinned      Boolean    @default(false)
+  isSystem      Boolean    @default(false)
+  allowComments Boolean    @default(true)
+  comments      Comment[]
+  likes         Like[]
+  hashtags      Hashtag[]  @relation("PostHashtags")
+  mentions      User[]     @relation("PostMentions")
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+}
+
+enum PostType {
+  TEXT
+  IMAGE
+  POLL
+  SYSTEM
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  post      Post     @relation(fields: [postId], references: [id])
+  postId    String
+  author    User     @relation(fields: [authorId], references: [id])
+  authorId  String
+  content   String
+  mentions  User[]   @relation("CommentMentions")
+  createdAt DateTime @default(now())
+}
+
+model Like {
+  id     String @id @default(cuid())
+  user   User   @relation(fields: [userId], references: [id])
+  userId String
+  post   Post   @relation(fields: [postId], references: [id])
+  postId String
+
+  @@unique([postId, userId])
+}
+
+model Hashtag {
+  id         String @id @default(cuid())
+  tag        String @unique
+  posts      Post[] @relation("PostHashtags")
+  trendScore Int    @default(0)
+}
+
+model EventTrend {
+  event      Event  @relation(fields: [eventId], references: [id])
+  eventId    String @id
+  trendScore Int    @default(0)
+}
