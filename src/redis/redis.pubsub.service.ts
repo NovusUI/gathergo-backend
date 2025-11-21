@@ -1,5 +1,10 @@
 // redis.pubsub.service.ts
-import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  OnModuleInit,
+  OnModuleDestroy,
+  Logger,
+} from '@nestjs/common';
 import Redis from 'ioredis';
 import { Server } from 'socket.io';
 import { PubSubMessage, PubSubNotification } from './pubsub.types';
@@ -12,8 +17,6 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
   private io: Server;
   private typingTimeouts = new Map<string, NodeJS.Timeout>();
   private readonly logger = new Logger(RedisPubSubService.name);
-
-
 
   constructor(private readonly prisma: PrismaService) {
     this.publisher = new Redis({
@@ -29,7 +32,6 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
   setSocketServer(io: Server) {
     this.io = io;
   }
-  
 
   async onModuleInit() {
     try {
@@ -56,10 +58,10 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
       }
 
       const payload = JSON.parse(message);
-      
+
       if (channel === 'notifications') {
         this.handleNotification(payload as PubSubNotification);
-      }else if (channel === 'posts') {
+      } else if (channel === 'posts') {
         this.handlePostMessage(payload);
       } else {
         this.handleStandardMessage(payload as PubSubMessage);
@@ -67,7 +69,7 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       this.logger.error(`Error processing ${channel} message`, {
         message,
-        error: error.stack
+        error: error.stack,
       });
     }
   }
@@ -113,32 +115,34 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
 
       const participantIds = [
         carpool.driverId,
-        ...carpool.passengers.map(p => p.userId)
-      ].filter(id => id !== senderId);
+        ...carpool.passengers.map((p) => p.userId),
+      ].filter((id) => id !== senderId);
 
-      await Promise.all(participantIds.map(async (recipientId) => {
-        const unreadKey = `message:unread:${recipientId}:${carpoolId}`;
-        const newCount = await this.publisher.incr(unreadKey);
+      await Promise.all(
+        participantIds.map(async (recipientId) => {
+          const unreadKey = `message:unread:${recipientId}:${carpoolId}`;
+          const newCount = await this.publisher.incr(unreadKey);
 
-        // Update conversation tray
-        this.io.to(`user:${recipientId}`).emit('conversationTrayUpdate', {
-          carpoolId,
-          lastMessage: message,
-          unreadCount: newCount,
-        });
+          // Update conversation tray
+          this.io.to(`user:${recipientId}`).emit('conversationTrayUpdate', {
+            carpoolId,
+            lastMessage: message,
+            unreadCount: newCount,
+          });
 
-        const totalUnread = await this.getTotalUnreadCount(recipientId);
-        this.io.to(`user:${recipientId}`).emit('unreadCountUpdate', {
-          totalUnread,
-          carpoolId,
-          unreadCount: newCount
-        });
-      }));
+          const totalUnread = await this.getTotalUnreadCount(recipientId);
+          this.io.to(`user:${recipientId}`).emit('unreadCountUpdate', {
+            totalUnread,
+            carpoolId,
+            unreadCount: newCount,
+          });
+        }),
+      );
     } catch (error) {
       this.logger.error(`Error handling chat message`, {
         carpoolId,
         senderId,
-        error: error.stack
+        error: error.stack,
       });
     }
   }
@@ -156,10 +160,13 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
 
     if (isTyping) {
       // Broadcast typing start
-      this.io.to(`carpool:${carpoolId}`).emit('typing', {
-        userId: senderId,
-        isTyping: true
-      });
+      this.io
+        .to(`carpool:${carpoolId}`)
+        .except(`user:${senderId}`)
+        .emit('typing', {
+          userId: senderId,
+          isTyping: true,
+        });
 
       // Set timeout to automatically stop typing
       const timeout = setTimeout(() => {
@@ -167,7 +174,7 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
           type: 'typing',
           carpoolId,
           senderId,
-          isTyping: false
+          isTyping: false,
         });
       }, 5000);
 
@@ -176,7 +183,7 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
       // Broadcast typing stopped
       this.io.to(`carpool:${carpoolId}`).emit('typing', {
         userId: senderId,
-        isTyping: false
+        isTyping: false,
       });
     }
   }
@@ -190,7 +197,7 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
 
   private handleNotification(payload: PubSubNotification) {
     const { recipientId } = payload;
-    console.log(recipientId)
+    console.log(recipientId);
     if (!recipientId) {
       this.logger.warn('Notification missing recipientId');
       return;
@@ -201,7 +208,7 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Notification sent to user ${recipientId}`);
     } catch (error) {
       this.logger.error(`Failed to send notification to user ${recipientId}`, {
-        error: error.stack
+        error: error.stack,
       });
     }
   }
@@ -210,19 +217,25 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
     try {
       const keys = await this.publisher.keys(`message:unread:${userId}:*`);
       if (!keys.length) return 0;
-      
+
       const counts = await this.publisher.mget(keys);
       return counts.reduce((acc, c) => acc + Number(c ?? 0), 0);
     } catch (error) {
-      this.logger.error(`Failed to get unread count for user ${userId}`, error.stack);
+      this.logger.error(
+        `Failed to get unread count for user ${userId}`,
+        error.stack,
+      );
       return 0;
     }
   }
 
-
-  private handlePostMessage(payload: { type: string; post?: any; comment?: any }) {
+  private handlePostMessage(payload: {
+    type: string;
+    post?: any;
+    comment?: any;
+  }) {
     const { type, post, comment } = payload;
-  
+
     switch (type) {
       case 'post:new':
       case 'post:pinned':
@@ -236,7 +249,7 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
         this.io.to(room).emit(type, post); // emits 'post:new', 'post:pinned', etc.
         break;
       }
-  
+
       case 'comment:new':
       case 'comment:deleted': {
         if (!comment?.postId) {
@@ -244,17 +257,15 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
           return;
         }
         const room = `post:${comment.postId}`;
-        console.log(room,type)
+        console.log(room, type);
         this.io.to(room).emit(type, comment); // emits 'comment:new' or 'comment:deleted'
         break;
       }
-  
+
       default:
         this.logger.warn(`Unknown post-related event type: ${type}`);
     }
   }
-  
-  
 
   async publish(data: PubSubMessage) {
     try {
@@ -263,7 +274,7 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       this.logger.error('Failed to publish message', {
         data,
-        error: error.stack
+        error: error.stack,
       });
     }
   }
@@ -272,20 +283,25 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
     try {
       const payload: PubSubNotification = {
         type: 'notifications',
-        ...notification
+        ...notification,
       };
       await this.publisher.publish('notifications', JSON.stringify(payload));
-      this.logger.log(`Notification published for user ${notification.recipientId}`);
+      this.logger.log(
+        `Notification published for user ${notification.recipientId}`,
+      );
     } catch (error) {
       this.logger.error('Failed to publish notification', {
         notification,
-        error: error.stack
+        error: error.stack,
       });
       throw error;
     }
   }
 
-  async publishPost(post: any, type: 'post:new' | 'post:pinned' | 'post:deleted' | 'post:updated') {
+  async publishPost(
+    post: any,
+    type: 'post:new' | 'post:pinned' | 'post:deleted' | 'post:updated',
+  ) {
     try {
       await this.publisher.publish('posts', JSON.stringify({ type, post }));
       this.logger.log(`Published ${type} for post ${post.id}`);
@@ -293,32 +309,28 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
       this.logger.error('Failed to publish post event', { error: error.stack });
     }
   }
-  
+
   async publishComment(comment: any, type: 'comment:new' | 'comment:deleted') {
     try {
       await this.publisher.publish('posts', JSON.stringify({ type, comment }));
       this.logger.log(`Published ${type} for comment ${comment.id}`);
     } catch (error) {
-      this.logger.error('Failed to publish comment event', { error: error.stack });
+      this.logger.error('Failed to publish comment event', {
+        error: error.stack,
+      });
     }
   }
-  
-  
 
   async onModuleDestroy() {
     try {
       // Clear all typing timeouts
-      this.typingTimeouts.forEach(timeout => clearTimeout(timeout));
+      this.typingTimeouts.forEach((timeout) => clearTimeout(timeout));
       this.typingTimeouts.clear();
-      
-      await Promise.all([
-        this.publisher.quit(),
-        this.subscriber.quit()
-      ]);
+
+      await Promise.all([this.publisher.quit(), this.subscriber.quit()]);
       this.logger.log('Redis Pub/Sub connections closed');
     } catch (error) {
       this.logger.error('Error during cleanup', error.stack);
     }
   }
 }
-
