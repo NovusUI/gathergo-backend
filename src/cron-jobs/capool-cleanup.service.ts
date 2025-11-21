@@ -6,40 +6,40 @@ import { PrismaService } from 'src/prisma/prisma.service';
 export class CarpoolCleanupService {
   constructor(private prisma: PrismaService) {}
 
-  @Cron(CronExpression.EVERY_HOUR)
-  async expireOldRequests() {
-    const now = new Date();
-    const nowPlusOneHour = new Date(now.getTime() + 60 * 60 * 1000);
+  // @Cron(CronExpression.EVERY_HOUR)
+  // async expireOldRequests() {
+  //   const now = new Date();
+  //   const nowPlusOneHour = new Date(now.getTime() + 60 * 60 * 1000);
 
-    // Expire requests if carpool departure time passed or carpool is deleted
-    const carpools = await this.prisma.carpool.findMany({
-      where: {
-        OR: [
-          {
-            departureTime: { lt: nowPlusOneHour },
-          },
-          {
-            isDeleted: true,
-          },
-        ],
-      },
-      select: { id: true },
-    });
+  //   // Expire requests if carpool departure time passed or carpool is deleted
+  //   const carpools = await this.prisma.carpool.findMany({
+  //     where: {
+  //       OR: [
+  //         {
+  //           departureTime: { lt: nowPlusOneHour },
+  //         },
+  //         {
+  //           isDeleted: true,
+  //         },
+  //       ],
+  //     },
+  //     select: { id: true },
+  //   });
 
-    const carpoolIds = carpools.map((c) => c.id);
+  //   const carpoolIds = carpools.map((c) => c.id);
 
-    if (carpoolIds.length === 0) return;
+  //   if (carpoolIds.length === 0) return;
 
-    const result = await this.prisma.carpoolPassenger.updateMany({
-      where: {
-        carpoolId: { in: carpoolIds },
-        status: 'PENDING',
-      },
-      data: {
-        status: 'EXPIRED',
-      },
-    });
+  //   const result = await this.prisma.carpoolPassenger.updateMany({
+  //     where: {
+  //       carpoolId: { in: carpoolIds },
+  //       status: 'PENDING',
+  //     },
+  //     data: {
+  //       status: 'EXPIRED',
+  //     },
+  //   });
 
-    console.log(`✅ Carpool cleanup: ${result.count} requests expired`);
-  }
+  //   console.log(`✅ Carpool cleanup: ${result.count} requests expired`);
+  // }
 }

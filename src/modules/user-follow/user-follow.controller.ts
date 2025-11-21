@@ -1,6 +1,19 @@
-import { Controller, Post, Body, UseGuards, Delete, Param, Get } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  UseGuards,
+  Delete,
+  Param,
+  Get,
+} from '@nestjs/common';
 import { FollowUserDto } from './dto/follow-user.dto';
-import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { UserFollowService } from './user-follow.service';
 import { JwtAuthGuard } from 'src/common/guards/jwt-auth.guard';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
@@ -20,7 +33,10 @@ export class UserFollowController {
 
   @Delete('user/:followingId')
   @ApiOperation({ summary: 'Unfollow a user' })
-  unfollowUser(@CurrentUser('id') userId: string, @Param('followingId') followingId: string) {
+  unfollowUser(
+    @CurrentUser('id') userId: string,
+    @Param('followingId') followingId: string,
+  ) {
     return this.followService.unfollowUser(userId, followingId);
   }
 
@@ -39,6 +55,4 @@ export class UserFollowController {
   async getMyFollowing(@CurrentUser('id') userId: string) {
     return this.followService.getFollowing(userId);
   }
-
-
 }

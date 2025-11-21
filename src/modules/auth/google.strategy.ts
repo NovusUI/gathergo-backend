@@ -13,58 +13,86 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
       callbackURL: 'http://localhost:4000/api/v1/auth/google/redirect',
       scope: ['email', 'profile'],
+      passReqToCallback: true, // This means validate gets 'request' as first param
     });
   }
 
-  async validate(accessToken: string, refreshToken: string, profile: any, done: VerifyCallback): Promise<any> {
+  // When passReqToCallback is true, first parameter is 'request'
+  async validate(
+    request: any, // ← ADD THIS
+    accessToken: string,
+    refreshToken: string,
+    profile: any,
+    done: VerifyCallback,
+  ): Promise<any> {
     const { id, emails, displayName, photos } = profile;
     const email = emails[0].value;
 
-    // Check if user exists
-    let user = await this.prisma.user.findUnique({
-      where: { email },
-    });
+    // Get redirect URL from query params (sent from mobile app)
+    const redirectUrl =
+      request.passportCustom?.oauthRedirect ||
+      request.query.state ||
+      request.oauthRedirect;
+    console.log('Redirect URL from state:', redirectUrl);
 
-
-    if (user && user?.googleId === id) {
-      return done(null, { id: user.id, email: user.email });
-    }
-
-    // CASE 2: Existing email/password user - link accounts
-  if (user && !user.googleId) {
-    const updatedUser = await this.prisma.user.update({
-      where: { email },
-      data: {
-        googleId: id,
-        profilePicUrl: photos[0]?.value || user.profilePicUrl,
-        password:null
-        // Optionally update name if not set
-        //name: user.name || displayName,
-        // emailVerified: true 
-      },
-    });
-    return done(null, { id: updatedUser.id, email: updatedUser.email });
-  }
-
-    // Create if doesn't exist
-    if (!user) {
-      const newUser  = await this.prisma.user.create({
-        data: {
-          email,
-          googleId: id,
-          profilePicUrl: photos[0].value,
-          isProfileComplete: false,
-        },
+    try {
+      // Check if user exists
+      let user = await this.prisma.user.findUnique({
+        where: { email },
       });
-      return done(null, { id: newUser.id, email: newUser.email });
+
+      // CASE 1: Existing Google user
+      if (user && user?.googleId === id) {
+        return done(null, {
+          id: user.id,
+          email: user.email,
+          redirectUrl, // Pass redirect URL along
+          hasPreferences: user.hasPreferences,
+        });
+      }
+
+      // CASE 2: Existing email/password user - link accounts
+      if (user && !user.googleId) {
+        const updatedUser = await this.prisma.user.update({
+          where: { email },
+          data: {
+            googleId: id,
+            profilePicUrl: photos[0]?.value || user.profilePicUrl,
+            password: null,
+          },
+        });
+        return done(null, {
+          id: updatedUser.id,
+          email: updatedUser.email,
+          redirectUrl,
+          hasPreferences: updatedUser.hasPreferences,
+        });
+      }
+
+      // CASE 3: New user - create account
+      if (!user) {
+        const newUser = await this.prisma.user.create({
+          data: {
+            email,
+            googleId: id,
+            profilePicUrl: photos[0]?.value,
+          },
+        });
+        return done(null, {
+          id: newUser.id,
+          email: newUser.email,
+          redirectUrl,
+          hasPreferences: newUser.hasPreferences,
+        });
+      }
+
+      // CASE 4: Conflict - existing account with different Google ID
+      return done(
+        new Error('This email is already associated with another account'),
+        false,
+      );
+    } catch (error) {
+      return done(error, false);
     }
-
-    // const payload = {
-    //   id: user.id,
-    //   email: user.email,
-    // };
-
-    // CASE 4: Conflict - existing account with different Google ID
-  done(new Error('This email is already associated with another account'), false);
   }
 }

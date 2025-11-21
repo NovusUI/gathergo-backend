@@ -1,9 +1,24 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsDateString, IsNumber, IsOptional, IsString, IsUUID, Max, Min,  } from 'class-validator';
+import {
+  IsDateString,
+  IsNumber,
+  IsObject,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Max,
+  Min,
+  ValidateNested,
+} from 'class-validator';
+import { Type } from 'class-transformer';
 import { IsAtLeast20MinInFuture } from 'src/common/validators';
+import { CoordinateDto } from 'src/common/dtos';
 
 export class CreateCarpoolDto {
-  @ApiPropertyOptional({ description: 'Optional event ID if this carpool is for an event', required: false })
+  @ApiPropertyOptional({
+    description: 'Optional event ID if this carpool is for an event',
+    required: false,
+  })
   @IsUUID()
   @IsOptional()
   eventId?: string;
@@ -12,49 +27,51 @@ export class CreateCarpoolDto {
   @IsString()
   origin: string;
 
-  @ApiProperty({ description: 'Destination of the carpool' })
+  @ApiProperty({ description: 'note from pooler' })
   @IsString()
-  destination: string;
+  @IsOptional()
+  note?: string;
 
-  @IsDateString()
-  @IsAtLeast20MinInFuture({ message: 'Departure time must be at least 20 minutes in the future' })
-  @ApiProperty({ description: 'Date and time of departure', example: '2025-07-20T15:00:00Z' })
-  departureTime: Date;
+  @ApiPropertyOptional({ description: 'Destination of the carpool' })
+  @IsString()
+  @IsOptional()
+  destination?: string;
+
+  @IsString()
+  @ApiProperty({
+    description: 'Date and time of departure',
+    example: '15:00',
+  })
+  departureTime: string;
 
   @ApiProperty({ description: 'Number of seats available' })
   @IsNumber()
   @Min(1)
   @Max(10)
-  availableSeats: number;
- 
-  @ApiProperty({description: 'price per seat', example: 10000})
-  @IsNumber()
-  pricePerSeat: number;
+  @IsOptional()
+  availableSeats?: number;
 
-  @ApiPropertyOptional({description: 'short description of vehicle', example: "a blck pickup"})
+  @ApiProperty({ description: 'Price per seat', example: 10000 })
+  @IsNumber()
+  @IsOptional()
+  pricePerSeat?: number;
+
+  @ApiPropertyOptional({
+    description: 'Short description of vehicle',
+    example: 'a black pickup',
+  })
   @IsString()
   @IsOptional()
-  description?:string
+  description?: string;
 
+  @ApiProperty({ description: 'Starting point coordinates' })
+  @ValidateNested()
+  @Type(() => CoordinateDto)
+  startPoint?: CoordinateDto;
 
-  @ApiPropertyOptional({description: 'latitude'})
-  @IsNumber()
+  @ApiPropertyOptional({ description: 'Destination point coordinates' })
   @IsOptional()
-  latitude?: number;
-
-  @ApiPropertyOptional({description: 'longitude'})
-  @IsNumber()
-  @IsOptional()
-  longitude?: number;
-
-  @ApiPropertyOptional({description: 'destination latitude'})
-  @IsNumber()
-  @IsOptional()
-  latitudeDest?: number;
-
-  @ApiPropertyOptional({description: 'destination longitude'})
-  @IsNumber()
-  @IsOptional()
-  longitudeDest?: number;
-
+  @ValidateNested()
+  @Type(() => CoordinateDto)
+  endPoint?: CoordinateDto;
 }
