@@ -5,7 +5,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { RecurringEventService } from './recurring-event.service'; // update path if needed
 import { CarpoolCleanupService } from './capool-cleanup.service';
 import { NotificationCleanupService } from './notification-cleanup.service';
-import { NotificationsService } from 'src/modules/background-notification/background.notification.service';
+import { NotificationsService } from 'src/modules/background-notification/backgroundnotification.service';
 
 @Module({
   imports: [ScheduleModule.forRoot()],

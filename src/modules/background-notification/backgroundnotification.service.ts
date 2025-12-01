@@ -7,7 +7,7 @@ import { Expo, ExpoPushMessage } from 'expo-server-sdk';
 export interface UserNotificationToken {
   userId: string;
   token: string;
-  platform: 'ios' | 'android';
+  platform: string;
   createdAt: string;
 }
 
@@ -29,7 +29,7 @@ export class NotificationsService {
   async registerToken(
     userId: string,
     token: string,
-    platform: 'ios' | 'android',
+    platform: string,
   ): Promise<void> {
     try {
       // Validate token based on type

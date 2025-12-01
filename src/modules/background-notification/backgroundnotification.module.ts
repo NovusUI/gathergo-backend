@@ -2,14 +2,15 @@
 import { Module } from '@nestjs/common';
 
 import { FirebaseModule } from '../firebase/firebase.module';
-import { NotificationsService } from './background.notification.service';
+import { NotificationsService } from './backgroundnotification.service';
 import { RedisModule } from 'src/redis/redis.module';
 import { GuardsModule } from 'src/common/guards/guards.module';
-import { NotificationsController } from './background.notification.controller';
+import { BackgroundNotificationsController } from './backgroundnotification.controller';
 
 @Module({
   imports: [FirebaseModule, RedisModule, GuardsModule],
-  providers: [NotificationsService, NotificationsController],
+  controllers: [BackgroundNotificationsController],
+  providers: [NotificationsService],
   exports: [NotificationsService],
 })
 export class BackgroundNotificationsModule {}
