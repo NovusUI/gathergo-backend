@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { NotificationsService } from 'src/modules/background-notification/background.notification.service';
+import { NotificationsService } from 'src/modules/background-notification/backgroundnotification.service';
 
 @Injectable()
 export class NotificationCleanupService {

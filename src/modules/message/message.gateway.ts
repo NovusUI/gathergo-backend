@@ -2,10 +2,6 @@
 import {
   SubscribeMessage,
   WebSocketGateway,
-  WebSocketServer,
-  OnGatewayConnection,
-  OnGatewayDisconnect,
-  OnGatewayInit,
   MessageBody,
   ConnectedSocket,
 } from '@nestjs/websockets';
@@ -14,7 +10,7 @@ import { Logger, UseGuards } from '@nestjs/common';
 import { MessageService } from './message.service';
 import { RedisPubSubService } from 'src/redis/redis.pubsub.service';
 import { WsJwtGuard } from 'src/common/guards/ws-jwt.guard';
-import { SocketAuthMiddleware } from 'src/common/middleware/ws.mw';
+import { BaseGateway } from 'src/common/base.gateway';
 
 @WebSocketGateway({
   cors: {
@@ -22,42 +18,14 @@ import { SocketAuthMiddleware } from 'src/common/middleware/ws.mw';
   },
 })
 @UseGuards(WsJwtGuard)
-export class MessageGateway
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
-{
-  @WebSocketServer() server: Server;
-  private logger: Logger = new Logger('MessageGateway');
+export class MessageGateway extends BaseGateway {
+  protected logger: Logger = new Logger('MessageGateway');
 
   constructor(
-    private readonly pubsubService: RedisPubSubService,
     private readonly messageService: MessageService,
-  ) {}
-
-  afterInit(server: Server) {
-    this.server = server;
-
-    // Apply your custom auth middleware globally to all socket connections
-    this.server.use(SocketAuthMiddleware() as any);
-
-    // Set the socket server on Redis pubsub service
-    this.pubsubService.setSocketServer(server);
-
-    this.logger.log('Notification Gateway initialized and middleware set');
-  }
-
-  handleConnection(client: Socket) {
-    const userId = client.handshake.auth.userId;
-    if (userId) {
-      client.join(`user:${userId}`);
-      this.logger.log(`Client ${client.id} connected (user ${userId})`);
-    } else {
-      this.logger.warn(`Client ${client.id} connected without auth`);
-      client.disconnect();
-    }
-  }
-
-  handleDisconnect(client: Socket) {
-    this.logger.log(`Client ${client.id} disconnected`);
+    pubsubService: RedisPubSubService,
+  ) {
+    super(pubsubService);
   }
 
   @SubscribeMessage('join')

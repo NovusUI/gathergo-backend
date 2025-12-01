@@ -30,8 +30,7 @@ import { CarpoolQueueModule } from './queue/carpool/queue.module';
 import { MessageModule } from './modules/message/message.module';
 import { RedisModule } from './redis/redis.module';
 import { GuardsModule } from './common/guards/guards.module';
-import { MessageService } from './modules/message/message.service';
-import { BackgroundNotificationsModule } from './modules/background-notification/background.notification.module';
+import { BackgroundNotificationsModule } from './modules/background-notification/backgroundnotification.module';
 
 @Module({
   imports: [

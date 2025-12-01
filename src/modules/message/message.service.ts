@@ -7,7 +7,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateMessageDto } from './dtos/create-message.dto';
 import { RedisService } from 'src/redis/redis.service';
 import { RedisPubSubService } from 'src/redis/redis.pubsub.service';
-import { NotificationsService } from '../background-notification/background.notification.service';
+import { NotificationsService } from '../background-notification/backgroundnotification.service';
 
 @Injectable()
 export class MessageService {

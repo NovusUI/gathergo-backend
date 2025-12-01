@@ -4,7 +4,7 @@ import { MessageService } from './message.service';
 import { RedisModule } from 'src/redis/redis.module';
 import { MessageGateway } from './message.gateway';
 import { GuardsModule } from 'src/common/guards/guards.module';
-import { NotificationsService } from '../background-notification/background.notification.service';
+import { NotificationsService } from '../background-notification/backgroundnotification.service';
 
 @Module({
   imports: [RedisModule, GuardsModule],

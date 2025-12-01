@@ -1,25 +1,25 @@
 // pubsub.types.ts
 export type PubSubMessage = {
-    type: 'chat' | 'typing' | 'tray_update';
-    carpoolId?: string;
-    senderId: string;
-    message?: any; // Your message type
-    isTyping?: boolean;
-    recipientId?: string; // For direct messages
+  type: 'chat' | 'typing' | 'tray_update';
+  carpoolId?: string;
+  senderId: string;
+  message?: any; // Your message type
+  isTyping?: boolean;
+  recipientId?: string; // For direct messages
 };
 
 export type PubSubNotification = {
-    type: 'notifications';
-    notificationType: string; // e.g., 'friend_request', 'carpool_update'
-    recipientId: string;
-    senderId?: string;
-    data: {
-      id: string;
-      title: string;
-      message: string;
-      imageUrl?: string;
-      link?: string;
-      createdAt: Date;
-      read: boolean;
-    };
+  type: 'notifications';
+  notificationType: string; // e.g., 'friend_request', 'carpool_update'
+  recipientId: string;
+  senderId?: string;
+  data: {
+    id: string;
+    title: string;
+    message: string;
+    imageUrl?: string | null;
+    link?: string | null;
+    createdAt: Date;
+    read: boolean;
   };
+};
