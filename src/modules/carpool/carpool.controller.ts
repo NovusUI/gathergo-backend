@@ -88,10 +88,16 @@ export class CarpoolController {
   @Post(':carpoolId/request')
   requestRide(
     @CurrentUser('id') userId: string,
+    @CurrentUser('username') username: string,
     @Param('carpoolId') carpoolId: string,
     @Body() joinRideDto: JoinCarpoolDto,
   ) {
-    return this.carpoolService.requestRide(userId, carpoolId, joinRideDto);
+    return this.carpoolService.requestRide(
+      userId,
+      carpoolId,
+      joinRideDto,
+      username,
+    );
   }
 
   @ApiOperation({ summary: 'Leave a ride as a passenger' })
@@ -99,8 +105,9 @@ export class CarpoolController {
   async leaveRide(
     @Param('carpoolId') carpoolId: string,
     @CurrentUser('id') userId: string,
+    @CurrentUser('username') username: string,
   ) {
-    return this.carpoolService.leaveRide(carpoolId, userId);
+    return this.carpoolService.leaveRide(carpoolId, userId, username);
   }
 
   @ApiOperation({ summary: 'respond to ride request' })
@@ -120,5 +127,28 @@ export class CarpoolController {
     @CurrentUser('id') driverId: string,
   ) {
     return this.carpoolService.removePassenger(driverId, requestId);
+  }
+
+  @Get(':id/chat-access')
+  async getCarpoolChatAccess(
+    @Param('id') carpoolId: string,
+    @CurrentUser('id') id: string,
+  ) {
+    return this.carpoolService.getCarpoolChatAccess(carpoolId, id);
+  }
+
+  @Post(':carpoolId/request-after-cancel')
+  async requestRideAfterCancel(
+    @Param('carpoolId') carpoolId: string,
+    @Body() data: { cancelCarpoolId: string } & JoinCarpoolDto,
+    @CurrentUser('id') userId: string,
+    @CurrentUser('username') username: string,
+  ) {
+    return this.carpoolService.requestRideAfterCancel(
+      userId,
+      carpoolId,
+      data,
+      username,
+    );
   }
 }

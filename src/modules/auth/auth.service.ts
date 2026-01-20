@@ -212,6 +212,7 @@ export class AuthService {
     id: string;
     email: string;
     hasPrefrences: boolean;
+    isProfileComplete: boolean;
   }) {
     // Generate JWT
     console.log(googleUser, 'google user');
@@ -220,6 +221,7 @@ export class AuthService {
       id: googleUser.id,
       email: googleUser.email,
       hasPreferences: googleUser.hasPrefrences,
+      isProfileComplete: googleUser.isProfileComplete,
     });
 
     return {
@@ -243,6 +245,7 @@ export class AuthService {
       sub: user.id,
       email: user.email,
       hasPreferences: user.hasPreferences,
+      isProfileComplete: user.isProfileComplete,
     };
 
     const accessToken = this.jwtService.sign(payload, {

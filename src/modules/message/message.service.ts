@@ -134,6 +134,7 @@ export class MessageService {
       carpoolId,
       senderId: userId,
       senderName: sender?.username || '',
+      link: '/chat/' + carpoolId,
     });
 
     return message;
@@ -158,6 +159,7 @@ export class MessageService {
         expiresAt: {
           gte: new Date(now.getTime() - 12 * 60 * 60 * 1000),
         },
+        status: 'ACTIVE',
       },
       include: { event: true },
     });
@@ -181,6 +183,7 @@ export class MessageService {
     ];
     const senders = await this.prisma.user.findMany({
       where: { id: { in: senderIds } },
+      select: { id: true, username: true, profilePicUrlTN: true },
     });
     const senderMap = new Map(senders.map((s) => [s.id, s]));
 

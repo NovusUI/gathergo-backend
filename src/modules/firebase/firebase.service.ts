@@ -195,6 +195,84 @@ export class FirebaseService {
     return this.getPublicUrl(filename);
   }
 
+  // Add to FirebaseService class
+
+  /**
+   * Send regular notification via FCM
+   */
+  async sendRegularNotification({
+    tokens,
+    title,
+    message,
+    link,
+    type,
+    data = {},
+  }: {
+    tokens: string[];
+    title: string;
+    message: string;
+    link?: string;
+    type: string;
+    data?: Record<string, any>;
+  }): Promise<void> {
+    try {
+      if (tokens.length === 0) {
+        return;
+      }
+
+      // Construct the notification payload
+      const messagePayload: admin.messaging.MulticastMessage = {
+        tokens,
+        notification: {
+          title,
+          body: message,
+        },
+        data: {
+          type,
+          title,
+          message,
+          link: link || '',
+          timestamp: new Date().toISOString(),
+          ...data,
+        },
+        android: {
+          priority: 'high',
+          notification: {
+            channelId: 'default',
+            sound: 'default',
+            priority: 'high',
+          },
+        },
+        apns: {
+          payload: {
+            aps: {
+              sound: 'default',
+              badge: 1,
+            },
+          },
+        },
+      };
+
+      // Send the notification
+      //const response = await this.messaging.sendEachForMulticast(messagePayload);
+
+      // Handle invalid tokens
+      // if (response.failureCount > 0) {
+      //   response.responses.forEach((resp, idx) => {
+      //     if (!resp.success) {
+      //       this.logger.warn(`Failed to send to token ${tokens[idx]}: ${resp.error?.message}`);
+      //       // Optionally remove invalid tokens here
+      //     }
+      //   });
+      // }
+
+      //this.logger.log(`Sent ${response.successCount} regular notifications via FCM`);
+    } catch (error) {
+      this.logger.error('Failed to send regular notification via FCM:', error);
+      throw error;
+    }
+  }
+
   async uploadResizedImage(
     buffer: Buffer,
     width: number,

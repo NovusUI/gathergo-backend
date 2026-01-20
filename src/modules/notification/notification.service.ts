@@ -3,6 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { RedisPubSubService } from 'src/redis/redis.pubsub.service';
 import { RedisService } from 'src/redis/redis.service';
+import { NotificationsService } from '../background-notification/backgroundnotification.service';
 
 export interface CreateNotificationData {
   recipientIds: string[];
@@ -11,6 +12,7 @@ export interface CreateNotificationData {
   message: string;
   imageUrl?: string;
   link?: string;
+  data?: any;
 }
 
 @Injectable()
@@ -21,6 +23,7 @@ export class NotificationService {
     private readonly prisma: PrismaService,
     private readonly redisPubSub: RedisPubSubService,
     private readonly redisService: RedisService,
+    private notificationsService: NotificationsService,
   ) {}
 
   async createNotification(data: CreateNotificationData) {
@@ -67,6 +70,15 @@ export class NotificationService {
           }),
         ),
       );
+
+      await this.notificationsService.sendRegularNotification({
+        userIds: data.recipientIds,
+        title: data.title,
+        link: data.link,
+        message: data.message,
+        type: data.type,
+        data: data.data,
+      });
 
       return notifications;
     } catch (error) {

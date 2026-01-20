@@ -96,6 +96,7 @@ export class AuthController {
       id: googleUser.id,
       email: googleUser.email,
       hasPrefrences: googleUser.hasPreferences,
+      isProfileComplete: googleUser.isProfileComplete,
     });
 
     // Get redirect URL from user object (passed from strategy)

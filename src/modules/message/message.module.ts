@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { MessageController } from './message.controller';
 import { MessageService } from './message.service';
 import { RedisModule } from 'src/redis/redis.module';

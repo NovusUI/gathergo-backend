@@ -43,6 +43,7 @@ model User {
   Post                  Post[]
   Registration          Registration[]
   Ticket                Ticket[]
+  Donation              Donation[] 
   TransactionReference  TransactionReference[]
   following             UserFollow[]           @relation("Follower")
   followedBy            UserFollow[]           @relation("Following")
@@ -118,15 +119,18 @@ model Event {
   endRepeat             DateTime?
   registrationAttendees Int?
   registrationFee       Int?
+  donationTarget        Int?
   thumbnailUrl          String?
   registrationType      RegistrationType
   carpools              Carpool[]
   community             Community?       @relation("CommunityEvents", fields: [communityId], references: [id])
   creator               User             @relation("UserEvents", fields: [creatorId], references: [id])
   eventTickets          EventTicket[]
+  donations             Donation[] 
   EventTrend            EventTrend?
   Post                  Post[]
   Registration          Registration[]
+  isImageProcessing     Boolean       @default(false)
 }
 
 model EventTicket {
@@ -172,6 +176,25 @@ model Registration {
   user          User     @relation(fields: [userId], references: [id])
 }
 
+model Donation {
+  id            String   @id @default(uuid())
+  userId        String
+  amount        Int      // Amount donated in kobo (₦50,000 = 5000000)
+  status        String   @default("active")
+  createdAt     DateTime @default(now())
+  transactionId String
+  eventId       String
+  message       String?  // Optional message from donor
+  isAnonymous   Boolean  @default(false) // Whether donor wants to be anonymous
+  event         Event    @relation(fields: [eventId], references: [id])
+  user          User     @relation(fields: [userId], references: [id])
+
+  @@index([eventId])
+  @@index([userId])
+  @@index([createdAt])
+  @@index([status])
+  @@index([transactionId])
+}
 model TransactionReference {
   id        String                @id @default(uuid())
   userId    String
@@ -237,6 +260,7 @@ model Notification {
   senderId    String?
   recipient   User     @relation("NotificationRecipient", fields: [recipientId], references: [id])
   sender      User?    @relation("NotificationSender", fields: [senderId], references: [id])
+  variant     String?
 
   @@index([recipientId])
   @@index([senderId])
@@ -332,6 +356,7 @@ enum Gender {
 enum RegistrationType {
   ticket
   registration
+  donation
 }
 
 enum TransactionStatusType {

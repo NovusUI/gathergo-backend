@@ -1,5 +1,23 @@
-import { Body, Controller, Get, Param, Patch, Post, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
+  ApiOperation,
+  ApiParam,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { UserService } from './user.service';
 import { JwtAuthGuard } from 'src/common/guards/jwt-auth.guard';
 import { CompleteProfileDto } from './dto/complete-profile-dto';
@@ -17,7 +35,10 @@ export class UserController {
   @Patch('complete-profile')
   @ApiOperation({ summary: 'Complete user profile after signup' })
   @ApiResponse({ status: 200, description: 'Profile updated successfully' })
-  async completeProfile(@CurrentUser('id') userId: string, @Body() dto: CompleteProfileDto) {
+  async completeProfile(
+    @CurrentUser('id') userId: string,
+    @Body() dto: CompleteProfileDto,
+  ) {
     return this.userService.completeProfile(userId, dto);
   }
 
@@ -41,8 +62,6 @@ export class UserController {
     return this.userService.getUserByEmail(email);
   }
 
-
-
   @Get('public/:userId')
   @ApiOperation({ summary: 'Get public user profile' })
   @ApiParam({ name: 'userId', description: 'Target user ID' })
@@ -63,7 +82,7 @@ export class UserController {
       properties: {
         file: { type: 'string', format: 'binary' },
       },
-      required: ['file']
+      required: ['file'],
     },
   })
   @UseInterceptors(FileInterceptor('file'))
@@ -71,6 +90,7 @@ export class UserController {
     @CurrentUser('id') userId: string,
     @UploadedFile() file: Express.Multer.File,
   ) {
+    console.log('uploading fifle.....');
     return this.userService.updateProfilePicture(userId, file);
   }
 }

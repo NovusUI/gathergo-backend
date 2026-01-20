@@ -40,6 +40,7 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
         this.subscriber.subscribe('typing'),
         this.subscriber.subscribe('notifications'),
         this.subscriber.subscribe('posts'), // 👈 NEW
+        this.subscriber.subscribe('carpool_updates'),
       ]);
 
       this.subscriber.on('message', this.messageHandler.bind(this));
@@ -63,6 +64,9 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
         this.handleNotification(payload as PubSubNotification);
       } else if (channel === 'posts') {
         this.handlePostMessage(payload);
+      } else if (channel === 'carpool_updates') {
+        // 👈 NEW: Handle carpool updates
+        this.handleCarpoolUpdateMessage(payload);
       } else {
         this.handleStandardMessage(payload as PubSubMessage);
       }
@@ -147,6 +151,219 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private handleCarpoolUpdateMessage(payload: {
+    type: 'passenger_added' | 'passenger_removed' | 'carpool_updated';
+    carpoolId: string;
+    data: any;
+    userId: string; // For passenger_added/removed
+    timestamp?: string;
+  }) {
+    const { type, carpoolId, data, userId, timestamp } = payload;
+
+    try {
+      switch (type) {
+        case 'passenger_added':
+          this.handlePassengerAdded(carpoolId, userId, data);
+          break;
+        case 'passenger_removed':
+          this.handlePassengerRemoved(carpoolId, userId, data);
+          break;
+        case 'carpool_updated':
+          this.handleCarpoolUpdated(carpoolId, data, timestamp);
+          break;
+        default:
+          this.logger.warn(`Unknown carpool update type: ${type}`);
+      }
+    } catch (error) {
+      this.logger.error(`Error handling carpool update: ${type}`, {
+        carpoolId,
+        error: error.stack,
+      });
+    }
+  }
+
+  private async handlePassengerAdded(
+    carpoolId: string,
+    userId: string,
+    data: any,
+  ) {
+    try {
+      // Get carpool details
+      const carpool = await this.prisma.carpool.findUnique({
+        where: { id: carpoolId },
+        include: {
+          driver: {
+            select: { id: true, username: true, profilePicUrlTN: true },
+          },
+          passengers: {
+            where: { status: 'ACCEPTED' },
+            include: {
+              user: {
+                select: { id: true, username: true, profilePicUrlTN: true },
+              },
+            },
+          },
+        },
+      });
+
+      if (!carpool) {
+        this.logger.warn(`Carpool ${carpoolId} not found`);
+        return;
+      }
+
+      // Notify all participants in the carpool room
+      this.io.to(`carpool:${carpoolId}`).emit('passengerAdded', {
+        carpoolId,
+        passenger: {
+          id: userId,
+          avatar: data.profilePicUrlTN,
+          status: data.status,
+        },
+      });
+
+      // Notify the driver specifically
+      // if (userId !== carpool.driverId) {
+      //   this.io.to(`user:${carpool.driverId}`).emit('passenger_added', {
+      //     carpoolId,
+      //     userId,
+      //     user: data.user,
+      //     carpool,
+      //     timestamp: new Date().toISOString()
+      //   });
+      // }
+
+      // Notify the new passenger
+      // this.io.to(`user:${userId}`).emit('passenger_added_confirmation', {
+      //   carpoolId,
+      //   carpool,
+      //   timestamp: new Date().toISOString()
+      // });
+
+      this.logger.log(`Passenger ${userId} added to carpool ${carpoolId}`);
+    } catch (error) {
+      this.logger.error(`Error handling passenger_added`, {
+        carpoolId,
+        userId,
+        error: error.stack,
+      });
+    }
+  }
+
+  // 👇 NEW: Handle passenger removed event
+  private async handlePassengerRemoved(
+    carpoolId: string,
+    userId: string,
+    data: any,
+  ) {
+    try {
+      // Get updated carpool details
+      const carpool = await this.prisma.carpool.findUnique({
+        where: { id: carpoolId },
+        include: {
+          driver: {
+            select: { id: true, username: true },
+          },
+          passengers: {
+            where: { status: 'ACCEPTED' },
+            include: {
+              user: {
+                select: { id: true, username: true },
+              },
+            },
+          },
+        },
+      });
+
+      if (!carpool) {
+        this.logger.warn(`Carpool ${carpoolId} not found`);
+        return;
+      }
+
+      // Notify all participants in the carpool room
+      this.io.to(`carpool:${carpoolId}`).emit('passengerRemoved', {
+        carpoolId,
+        userId,
+        passengerName: data.username,
+      });
+
+      // Notify the removed passenger
+      // this.io.to(`user:${userId}`).emit('passenger_removed_notification', {
+      //   carpoolId,
+      //   reason: data.reason,
+      //   timestamp: new Date().toISOString()
+      // });
+
+      // Clear user's unread messages for this carpool
+      const unreadKey = `message:unread:${userId}:${carpoolId}`;
+      await this.publisher.del(unreadKey);
+
+      this.logger.log(`Passenger ${userId} removed from carpool ${carpoolId}`);
+    } catch (error) {
+      this.logger.error(`Error handling passenger_removed`, {
+        carpoolId,
+        userId,
+        error: error.stack,
+      });
+    }
+  }
+
+  // 👇 NEW: Handle carpool updated event
+  private async handleCarpoolUpdated(
+    carpoolId: string,
+    data: any,
+    timestamp?: string,
+  ) {
+    try {
+      // Get updated carpool details
+      const carpool = await this.prisma.carpool.findUnique({
+        where: { id: carpoolId },
+        include: {
+          driver: {
+            select: { id: true, username: true },
+          },
+          passengers: {
+            where: { status: 'ACCEPTED' },
+            include: {
+              user: {
+                select: { id: true, username: true },
+              },
+            },
+          },
+        },
+      });
+
+      if (!carpool) {
+        this.logger.warn(`Carpool ${carpoolId} not found`);
+        return;
+      }
+
+      const updateData = {
+        carpoolId,
+        changes: data,
+      };
+
+      // Notify all participants in the carpool room
+      this.io.to(`carpool:${carpoolId}`).emit('carpoolUpdated', updateData);
+
+      // Also notify each participant individually (for cases where they're not in the room)
+      // const participantIds = [
+      //   carpool.driverId,
+      //   ...carpool.passengers.map((p) => p.userId),
+      // ];
+
+      // participantIds.forEach((participantId) => {
+      //   this.io.to(`user:${participantId}`).emit('carpool_updated', updateData);
+      // });
+
+      this.logger.log(`Carpool ${carpoolId} updated`);
+    } catch (error) {
+      this.logger.error(`Error handling carpool_updated`, {
+        carpoolId,
+        error: error.stack,
+      });
+    }
+  }
+
   private handleTypingIndicator(payload: PubSubMessage) {
     const { carpoolId, senderId, isTyping } = payload;
     const key = `${senderId}-${carpoolId}`;
@@ -204,7 +421,7 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      this.io.to(`user:${recipientId}`).emit('notifications', payload);
+      this.io.to(`user:${recipientId}`).emit('newNotification', payload);
       this.logger.log(`Notification sent to user ${recipientId}`);
     } catch (error) {
       this.logger.error(`Failed to send notification to user ${recipientId}`, {
@@ -285,6 +502,8 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
         type: 'notifications',
         ...notification,
       };
+
+      console.log('sent notify', payload);
       await this.publisher.publish('notifications', JSON.stringify(payload));
       this.logger.log(
         `Notification published for user ${notification.recipientId}`,
@@ -318,6 +537,34 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
       this.logger.error('Failed to publish comment event', {
         error: error.stack,
       });
+    }
+  }
+
+  async publishCarpoolUpdate(
+    type: 'passenger_added' | 'passenger_removed' | 'carpool_updated',
+    carpoolId: string,
+    data: any,
+    userId?: string,
+    timestamp?: string,
+  ) {
+    try {
+      const payload = {
+        type,
+        carpoolId,
+        data,
+        userId,
+        timestamp: timestamp || new Date().toISOString(),
+      };
+
+      await this.publisher.publish('carpool_updates', JSON.stringify(payload));
+      this.logger.log(`Published ${type} for carpool ${carpoolId}`);
+    } catch (error) {
+      this.logger.error('Failed to publish carpool update', {
+        type,
+        carpoolId,
+        error: error.stack,
+      });
+      throw error;
     }
   }
 
