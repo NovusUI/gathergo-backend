@@ -9,7 +9,7 @@ export type PubSubMessage = {
 };
 
 export type PubSubNotification = {
-  type: 'notifications';
+  type: string;
   notificationType: string; // e.g., 'friend_request', 'carpool_update'
   recipientId: string;
   senderId?: string;

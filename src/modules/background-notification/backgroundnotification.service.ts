@@ -93,13 +93,13 @@ export class NotificationsService {
 
     // Validate tokens periodically
     const tokenStrings = tokens.map((t) => t.token);
-    const { valid } = await this.firebaseService.validateTokens(tokenStrings);
-
+    //const { valid } = await this.firebaseService.validateTokens(tokenStrings);
+    //console.log(tokens, valid, 'valid tokens');
     // Update stored tokens - remove invalid ones
-    const validTokens = tokens.filter((t) => valid.includes(t.token));
-    await this.setUserTokens(userId, validTokens);
+    //const validTokens = tokens.filter((t) => valid.includes(t.token));
+    //await this.setUserTokens(userId, validTokens);
 
-    return valid;
+    return tokens.map((token) => token.token);
   }
 
   /**
@@ -116,6 +116,130 @@ export class NotificationsService {
     return allTokens;
   }
 
+  // Add to NotificationsService class
+
+  /**
+   * Send regular notification with custom title, message, link, and type
+   */
+  async sendRegularNotification({
+    userIds,
+    title,
+    message,
+    link,
+    type,
+    data = {},
+  }: {
+    userIds: string[];
+    title: string;
+    message: string;
+    link?: string;
+    type: string;
+    data?: Record<string, any>;
+  }): Promise<void> {
+    try {
+      // Get all tokens for all users
+      const allTokens = await this.getMultipleUserTokens(userIds);
+
+      if (allTokens.length === 0) {
+        this.logger.log('No valid FCM tokens found for regular notification');
+        return;
+      }
+
+      // Separate Expo and FCM tokens
+      const { expoTokens, fcmTokens } = this.separateTokensByType(allTokens);
+
+      // Send Expo notifications
+      if (expoTokens.length > 0) {
+        await this.sendExpoRegularNotification({
+          tokens: expoTokens,
+          title,
+          message,
+          link,
+          type,
+          data,
+        });
+      }
+
+      // Send FCM notifications
+      if (fcmTokens.length > 0) {
+        await this.firebaseService.sendRegularNotification({
+          tokens: fcmTokens,
+          title,
+          message,
+          link,
+          type,
+          data,
+        });
+      }
+
+      this.logger.log(
+        `Sent regular notification "${title}" to ${allTokens.length} tokens for users: ${userIds.join(', ')}`,
+      );
+    } catch (error) {
+      this.logger.error('Failed to send regular notification:', error);
+    }
+  }
+
+  /**
+   * Send regular notification via Expo
+   */
+  private async sendExpoRegularNotification({
+    tokens,
+    title,
+    message,
+    link,
+    type,
+    data = {},
+  }: {
+    tokens: string[];
+    title: string;
+    message: string;
+    link?: string;
+    type: string;
+    data?: Record<string, any>;
+  }): Promise<void> {
+    try {
+      const validTokens = tokens.filter((token) => Expo.isExpoPushToken(token));
+
+      if (validTokens.length === 0) {
+        return;
+      }
+
+      const messages: ExpoPushMessage[] = validTokens.map((token) => ({
+        to: token,
+        sound: 'default',
+        title,
+        body: message,
+        data: {
+          type,
+          link: link || '',
+          ...data,
+          timestamp: new Date().toISOString(),
+        },
+        badge: 1,
+      }));
+
+      const chunks = this.expo.chunkPushNotifications(messages);
+
+      for (const chunk of chunks) {
+        try {
+          const receipts = await this.expo.sendPushNotificationsAsync(chunk);
+          this.logger.log(`Sent ${chunk.length} Expo regular notifications`);
+
+          // Check receipts for errors and remove invalid tokens
+          await this.handleExpoReceipts(receipts, chunk);
+        } catch (error) {
+          this.logger.error(
+            'Error sending Expo regular notification chunk:',
+            error,
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.error('Failed to send Expo regular notification:', error);
+    }
+  }
+
   /**
    * Send new message notification
    */
@@ -125,12 +249,14 @@ export class NotificationsService {
     carpoolId,
     senderName,
     senderId,
+    link,
   }: {
     userIds: string[];
     message: any;
     carpoolId?: string;
     senderName?: string;
     senderId?: string;
+    link?: string;
   }): Promise<void> {
     try {
       // Get all tokens for all users
@@ -144,6 +270,7 @@ export class NotificationsService {
 
       // Separate Expo and FCM tokens
       const { expoTokens, fcmTokens } = this.separateTokensByType(allTokens);
+      console.log(expoTokens, 'this is expo teken');
 
       // Send Expo notifications
       if (expoTokens.length > 0) {
@@ -153,6 +280,7 @@ export class NotificationsService {
           carpoolId,
           senderName,
           senderId,
+          link,
         });
       }
 
@@ -230,12 +358,14 @@ export class NotificationsService {
     carpoolId,
     senderName,
     senderId,
+    link,
   }: {
     tokens: string[];
     message: any;
     carpoolId?: string;
     senderName?: string;
     senderId?: string;
+    link?: string;
   }): Promise<void> {
     try {
       const validTokens = tokens.filter((token) => Expo.isExpoPushToken(token));
@@ -257,6 +387,7 @@ export class NotificationsService {
           senderName: senderName || message.sender?.username || '',
           content: message.content || '',
           createdAt: message.createdAt || new Date().toISOString(),
+          link,
         },
         badge: 1,
       }));
@@ -381,7 +512,7 @@ export class NotificationsService {
   ): Promise<UserNotificationToken[]> {
     try {
       const data = await this.redisService.client.get(redisKey);
-
+      console.log(redisKey, data, 'this is token');
       if (!data) {
         return [];
       }
@@ -418,6 +549,7 @@ export class NotificationsService {
     tokens: UserNotificationToken[],
   ): Promise<void> {
     try {
+      console.log(redisKey, tokens, 'regiestering tokenssssss');
       await this.redisService.client.set(
         redisKey,
         JSON.stringify(tokens),

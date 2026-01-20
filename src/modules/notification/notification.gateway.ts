@@ -27,6 +27,7 @@ export class NotificationGateway extends BaseGateway {
   protected onUserConnected(client: Socket, userId: string) {
     // Send initial data on connection
     this.notificationService.getNotificationTray(userId).then((tray) => {
+      console.log(tray, 'notificartion traore');
       client.emit('notificationTray', tray);
     });
   }
@@ -104,10 +105,12 @@ export class NotificationGateway extends BaseGateway {
   @SubscribeMessage('getNotificationTray')
   async handleGetNotificationTray(@ConnectedSocket() client: Socket) {
     const userId = client.handshake.auth.user.sub;
+    console.log('sending conversation tray!');
     if (!userId) return;
 
     try {
       const tray = await this.notificationService.getNotificationTray(userId);
+      console.log('this is ct', tray);
       client.emit('notificationTray', tray);
     } catch (error) {
       this.logger.error('Error getting notification tray', error.stack);

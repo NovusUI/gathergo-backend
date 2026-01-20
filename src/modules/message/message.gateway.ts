@@ -11,6 +11,8 @@ import { MessageService } from './message.service';
 import { RedisPubSubService } from 'src/redis/redis.pubsub.service';
 import { WsJwtGuard } from 'src/common/guards/ws-jwt.guard';
 import { BaseGateway } from 'src/common/base.gateway';
+import { CarpoolValidationService } from '../validation/carpool-validation.service';
+import { PrismaService } from 'src/prisma/prisma.service';
 
 @WebSocketGateway({
   cors: {
@@ -24,6 +26,8 @@ export class MessageGateway extends BaseGateway {
   constructor(
     private readonly messageService: MessageService,
     pubsubService: RedisPubSubService,
+    // private readonly carpoolValidationService: CarpoolValidationService,
+    private readonly prisma: PrismaService,
   ) {
     super(pubsubService);
   }
@@ -34,6 +38,13 @@ export class MessageGateway extends BaseGateway {
     @MessageBody() data: { carpoolId: string; limit?: number },
   ) {
     const { carpoolId, limit = 20 } = data;
+
+    const hasAccess = await this.validateCarpoolAccess(
+      client,
+      carpoolId,
+      this.prisma,
+    );
+    if (!hasAccess) return;
 
     client.join(`carpool:${carpoolId}`);
 
@@ -63,12 +74,19 @@ export class MessageGateway extends BaseGateway {
   }
 
   @SubscribeMessage('typing')
-  handleTyping(
+  async handleTyping(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { carpoolId: string; isTyping: boolean },
   ) {
     const userId = client.handshake.auth.userId;
     if (!userId) return;
+
+    const hasAccess = await this.validateCarpoolAccess(
+      client,
+      data.carpoolId,
+      this.prisma,
+    );
+    if (!hasAccess) return;
 
     this.pubsubService.publish({
       type: 'typing',
@@ -85,6 +103,14 @@ export class MessageGateway extends BaseGateway {
     payload: { carpoolId: string; content: string; tempId: string },
   ) {
     const userId = client.handshake.auth.user.sub;
+
+    const hasAccess = await this.validateCarpoolAccess(
+      client,
+      payload.carpoolId,
+      this.prisma,
+    );
+    if (!hasAccess) return;
+
     const message = await this.messageService.createMessage(
       userId,
       payload.carpoolId,
@@ -100,6 +126,13 @@ export class MessageGateway extends BaseGateway {
   ) {
     const userId = client.handshake.auth.user.sub;
     console.log(userId, 'userId');
+
+    const hasAccess = await this.validateCarpoolAccess(
+      client,
+      data.carpoolId,
+      this.prisma,
+    );
+    if (!hasAccess) return;
     await this.messageService.markMessagesAsRead(userId, data.carpoolId);
 
     const totalUnread = await this.messageService.getTotalUnreadCount(userId);
@@ -128,6 +161,13 @@ export class MessageGateway extends BaseGateway {
   ) {
     const { carpoolId, before, beforeId, limit = 20 } = data;
 
+    const hasAccess = await this.validateCarpoolAccess(
+      client,
+      carpoolId,
+      this.prisma,
+    );
+    if (!hasAccess) return;
+
     const messages = await this.messageService.getMessagesCursor(
       carpoolId,
       limit,
@@ -149,8 +189,9 @@ export class MessageGateway extends BaseGateway {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { userId: string },
   ) {
-    const tray = await this.messageService.getConversationTray(data.userId);
-
+    const userId = client.handshake.auth.userId;
+    const tray = await this.messageService.getConversationTray(userId);
+    console.log(tray, 'convo tray');
     client.emit('conversationTrayUpdate', tray);
   }
 

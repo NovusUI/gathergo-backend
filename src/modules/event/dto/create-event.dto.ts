@@ -9,7 +9,6 @@ import {
   IsString,
   IsUrl,
   ValidateIf,
-
   Min,
 } from 'class-validator';
 
@@ -18,21 +17,13 @@ import { IsDateAfterMinutes } from 'src/common/validators/date-min-offset.decora
 import { IsDateGreaterThan } from 'src/common/validators/date-greater-than.decorator';
 import { Transform } from 'class-transformer';
 
-
-
 enum RegistrationType {
   TICKET = 'ticket',
   REGISTRATION = 'registration',
+  DONATION = 'donation',
 }
 
-
-
-
-
 export class CreateEventDto {
-
-
-  
   @ApiProperty()
   @IsNotEmpty()
   @IsString()
@@ -68,12 +59,16 @@ export class CreateEventDto {
 
   @ApiProperty()
   @IsDateString()
-  @IsDateAfterMinutes(20, { message: 'Start date must be at least 30 minutes from now' })
+  @IsDateAfterMinutes(20, {
+    message: 'Start date must be at least 30 minutes from now',
+  })
   startDate: string;
 
   @ApiProperty()
   @IsDateString()
-  @IsDateGreaterThan('startDate', { message: 'End date must be after start date' })
+  @IsDateGreaterThan('startDate', {
+    message: 'End date must be after start date',
+  })
   endDate: string;
 
   @ApiPropertyOptional({ enum: Reoccurring, default: Reoccurring.NONE })
@@ -107,17 +102,25 @@ export class CreateEventDto {
   @Min(0)
   registrationFee?: number;
 
+  @ApiPropertyOptional()
+  @ValidateIf((o) => o.registrationType === RegistrationType.DONATION)
+  @IsNotEmpty()
+  @IsNumber()
+  @Min(500000)
+  donationTarget?: number;
+
   @ApiPropertyOptional({ type: [String] })
-  @ValidateIf(o => o.registrationType === RegistrationType.TICKET)
+  @ValidateIf((o) => o.registrationType === RegistrationType.TICKET)
   @IsArray()
   @Transform(({ value }) => (Array.isArray(value) ? value : [value]))
   tickets?: string[];
 
-
   @ApiPropertyOptional()
   @IsOptional()
-  @ValidateIf((o) => (o.reoccurring !== Reoccurring.NONE && o.endRepeat !== null))
+  @ValidateIf((o) => o.reoccurring !== Reoccurring.NONE && o.endRepeat !== null)
   @IsDateString()
-  @IsDateGreaterThan('endDate', { message: 'End repeat must be after end date' })
+  @IsDateGreaterThan('endDate', {
+    message: 'End repeat must be after end date',
+  })
   endRepeat?: string;
 }

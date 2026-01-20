@@ -15,6 +15,33 @@ import { getRandomNote } from 'src/utils';
 import { JoinCarpoolDto } from './dto/join-carpool.dto';
 import { MessageService } from '../message/message.service';
 import { MessageGateway } from '../message/message.gateway';
+import { notificationConstants } from 'src/common/constants';
+import { NotificationService } from '../notification/notification.service';
+import { RedisPubSubService } from 'src/redis/redis.pubsub.service';
+
+interface CarpoolWithDetails {
+  id: string;
+  driverId: string;
+  eventId: string | null;
+  isDeleted: boolean;
+  availableSeats: number;
+  event: { id: string; title: string } | null;
+  passengers: Array<{
+    origin: string;
+    note: string | null;
+    id: string;
+    status: string;
+    updatedAt: Date | null;
+    userId: string;
+    carpoolId: string;
+    joinedAt: Date | null;
+    requestedAt: Date;
+    estimatedDistance: string | null;
+  }>;
+  _count?: {
+    passengers?: number;
+  };
+}
 
 @Injectable()
 export class CarpoolService {
@@ -22,6 +49,8 @@ export class CarpoolService {
     private prisma: PrismaService,
     private messageService: MessageService,
     private messageGateway: MessageGateway,
+    private notificationService: NotificationService,
+    private readonly pubsubService: RedisPubSubService,
   ) {}
 
   async create(userId: string, data: CreateCarpoolDto) {
@@ -339,16 +368,32 @@ export class CarpoolService {
     passengerId: string,
     carpoolId: string,
     data: JoinCarpoolDto,
+    username: string,
   ) {
     const carpool = await this.prisma.carpool.findUnique({
       where: { id: carpoolId, isDeleted: false },
+      include: {
+        _count: {
+          select: {
+            passengers: {
+              where: {
+                status: 'ACCEPTED',
+              },
+            },
+          },
+        },
+        event: true,
+      },
     });
-    if (!carpool || carpool.isDeleted)
+
+    if (!carpool || carpool.isDeleted) {
       throw new NotFoundException('Carpool not found or deleted');
+    }
 
     // 💡 Check if user has created a carpool for this event already
+    let existingDriverCarpool: CarpoolWithDetails | null = null;
     if (carpool.eventId) {
-      const existingDriverCarpool = await this.prisma.carpool.findFirst({
+      const foundCarpool = (await this.prisma.carpool.findFirst({
         where: {
           driverId: passengerId,
           eventId: carpool.eventId,
@@ -356,19 +401,30 @@ export class CarpoolService {
         },
         include: {
           event: { select: { id: true, title: true } },
-          passengers: true,
+          passengers: {
+            where: {
+              status: { in: ['ACCEPTED', 'PENDING'] },
+            },
+          },
+          _count: {
+            select: {
+              passengers: {
+                where: {
+                  status: 'ACCEPTED',
+                },
+              },
+            },
+          },
         },
-      });
+      })) as CarpoolWithDetails | null;
 
-      if (existingDriverCarpool) {
-        return {
-          message: 'You have already created a carpool for this event',
-          carpool: existingDriverCarpool,
-        };
-      }
+      // Explicitly assign the type
+      existingDriverCarpool = foundCarpool;
     }
 
-    if (carpool.availableSeats <= 0) {
+    const acceptedPassengersCount = carpool._count?.passengers || 0;
+
+    if (acceptedPassengersCount >= carpool.availableSeats) {
       throw new BadRequestException('Carpool is full');
     }
 
@@ -382,6 +438,7 @@ export class CarpoolService {
         carpool: true,
       },
     });
+
     if (existing) {
       return {
         message: 'you already requested this ride',
@@ -399,10 +456,33 @@ export class CarpoolService {
         },
       },
     });
+
     if (activeRequests >= 6) {
       throw new BadRequestException(
         'You can only have 6 pending requests at a time',
       );
+    }
+
+    // If user has an existing carpool for this event, return info instead of creating request
+    if (existingDriverCarpool) {
+      return {
+        message: 'You have already created a carpool for this event',
+        hasExistingCarpool: true,
+        existingCarpool: {
+          id: existingDriverCarpool.id,
+          eventTitle: existingDriverCarpool.event?.title,
+          passengerCount: existingDriverCarpool._count?.passengers || 0,
+          hasActivePassengers: existingDriverCarpool.passengers.length > 0,
+          canCancel: (existingDriverCarpool._count?.passengers || 0) === 0, // Can cancel if no accepted passengers
+        },
+        targetCarpool: {
+          id: carpool.id,
+          driverId: carpool.driverId,
+          origin: data.origin,
+          note: data.note,
+          startPoint: data.startPoint,
+        },
+      };
     }
 
     let estimatedDistance: string | null = null;
@@ -455,7 +535,103 @@ export class CarpoolService {
       estimatedDistance,
     );
 
-    return created;
+    await this.notificationService.createNotification({
+      recipientIds: [carpool.driverId],
+      title: notificationConstants.CARPOOL_REQUEST_TITLE_REQUEST,
+      message: notificationConstants.CARPOOL_REQUEST_MESSAGE_REQUEST(
+        username,
+        carpool.event?.title || '',
+      ),
+      type: notificationConstants.CARPOOL_NOTIFICATION_TYPE_REQUEST,
+      imageUrl: carpool.event?.thumbnailUrl || '',
+      data: {
+        carpoolId,
+      },
+      link: '/carpool/' + carpoolId,
+    });
+
+    return {
+      success: true,
+      data: created,
+    };
+  }
+
+  async requestRideAfterCancel(
+    passengerId: string,
+    carpoolId: string,
+    data: { cancelCarpoolId: string } & JoinCarpoolDto,
+    username: string,
+  ) {
+    const { cancelCarpoolId, ...joinData } = data;
+
+    // First, cancel the existing carpool
+    const existingCarpool = await this.prisma.carpool.findFirst({
+      where: {
+        id: cancelCarpoolId,
+        driverId: passengerId,
+        isDeleted: false,
+      },
+      include: {
+        passengers: {
+          where: {
+            status: {
+              in: ['PENDING', 'ACCEPTED'],
+            },
+          },
+
+          select: {
+            userId: true,
+          },
+        },
+        event: true,
+      },
+    });
+
+    if (!existingCarpool) {
+      throw new NotFoundException('Existing carpool not found');
+    }
+
+    // Check if carpool has accepted passengers
+    // if (existingCarpool._count.passengers > 0) {
+    //   throw new BadRequestException(
+    //     'Cannot cancel carpool with accepted passengers. Please remove them first.',
+    //   );
+    // }
+
+    // Soft delete the existing carpool
+    await this.prisma.carpool.update({
+      where: { id: cancelCarpoolId },
+      data: { isDeleted: true },
+    });
+
+    // Notify any pending passengers
+    const pendingPassengerIds = existingCarpool.passengers.map((p) => p.userId);
+
+    if (pendingPassengerIds.length > 0) {
+      await this.notificationService.createNotification({
+        recipientIds: pendingPassengerIds,
+        title: notificationConstants.CARPOOL_NOTIFICATION_TYPE_CANCELLED,
+        message: notificationConstants.CARPOOL_REQUEST_MESSAGE_CANCELLED(
+          existingCarpool.event?.title ?? '',
+        ),
+        type: notificationConstants.CARPOOL_NOTIFICATION_TYPE_CANCELLED,
+        imageUrl: existingCarpool.event?.thumbnailUrl || '',
+        data: {
+          carpoolId: cancelCarpoolId,
+        },
+      });
+
+      // Delete pending passenger records
+      await this.prisma.carpoolPassenger.deleteMany({
+        where: {
+          carpoolId: cancelCarpoolId,
+          status: 'PENDING',
+        },
+      });
+    }
+
+    // Now proceed with the original ride request
+    return this.requestRide(passengerId, carpoolId, joinData, username);
   }
 
   async respondToRequest(
@@ -465,7 +641,17 @@ export class CarpoolService {
   ) {
     const request = await this.prisma.carpoolPassenger.findUnique({
       where: { id: requestId },
-      include: { carpool: true },
+      include: {
+        carpool: {
+          select: {
+            driverId: true,
+            availableSeats: true,
+            event: true,
+            driver: true,
+          },
+        },
+        user: true,
+      },
     });
     if (!request) throw new NotFoundException('Request not found');
     if (request.carpool.driverId !== driverId)
@@ -484,10 +670,10 @@ export class CarpoolService {
           where: { id: requestId },
           data: { status: dto.action },
         }),
-        this.prisma.carpool.update({
-          where: { id: request.carpoolId },
-          data: { availableSeats: { decrement: 1 } },
-        }),
+        // this.prisma.carpool.update({
+        //   where: { id: request.carpoolId },
+        //   data: { availableSeats: { decrement: 1 } },
+        // }),
       ]);
 
       // Fetch updated tray for this user
@@ -497,24 +683,69 @@ export class CarpoolService {
 
       // Emit real-time tray update
       await this.messageGateway.pushConversationTray(request.userId, tray);
+
+      await this.notificationService.createNotification({
+        recipientIds: [request.userId],
+        title: notificationConstants.CARPOOL_REQUEST_TITLE_ACCEPTED,
+        message: notificationConstants.CARPOOL_REQUEST_MESSAGE_ACCEPTED(
+          request.carpool.driver.username || '',
+          request.carpool.event?.title || '',
+        ),
+        type: notificationConstants.CARPOOL_NOTIFICATION_TYPE_ACCEPTED,
+        data: {
+          carpoolId: request.carpoolId,
+        },
+        link: '/chat/' + request.carpoolId,
+        imageUrl: request.carpool.event?.thumbnailUrl ?? '',
+      });
     } else {
       await this.prisma.carpoolPassenger.update({
         where: { id: request.id },
         data: { status: dto.action },
       });
+      await this.notificationService.createNotification({
+        recipientIds: [request.userId],
+        title: notificationConstants.CARPOOL_REQUEST_TITLE_REJECTED,
+        message: notificationConstants.CARPOOL_REQUEST_MESSAGE_REJECT,
+        type: notificationConstants.CARPOOL_NOTIFICATION_TYPE_REJECTED,
+        data: {
+          carpoolId: request.carpoolId,
+        },
+        link: '/carpool/' + request.carpoolId,
+        imageUrl: request.carpool.event?.thumbnailUrl ?? '',
+      });
+      await this.pubsubService.publishCarpoolUpdate(
+        'passenger_added',
+        request.carpoolId,
+        {
+          id: request.userId,
+          avatar: request.user.profilePicUrlTN,
+          status: 'ACCEPTED',
+        },
+        request.userId,
+      );
     }
 
     return { message: `Request ${dto.action.toLowerCase()}` };
   }
 
   // 🚗 Leave a ride
-  async leaveRide(carpoolId: string, userId: string) {
+  async leaveRide(carpoolId: string, userId: string, username: string) {
     console.log('this');
     const passengerRequest = await this.prisma.carpoolPassenger.findFirst({
       where: {
         carpoolId,
         userId,
         status: 'ACCEPTED',
+      },
+      select: {
+        carpool: {
+          select: {
+            driver: true,
+            event: true,
+          },
+        },
+        id: true,
       },
     });
 
@@ -531,23 +762,39 @@ export class CarpoolService {
       data: { status: 'LEFT' },
     });
 
-    console.log('here');
-    await this.prisma.carpool.update({
-      where: { id: carpoolId },
-      data: { availableSeats: { increment: 1 } },
-    });
+    await this.pubsubService.publishCarpoolUpdate(
+      'passenger_removed',
+      carpoolId,
+      {},
+      userId,
+    );
 
-    console.log('there');
+    await this.notificationService.createNotification({
+      recipientIds: [passengerRequest.carpool.driver.id],
+      title: notificationConstants.CARPOOL_REQUEST_TITLE_LEFT,
+      message: notificationConstants.CARPOOL_REQUEST_MESSAGE_LEFT(username),
+      type: notificationConstants.CARPOOL_NOTIFICATION_TYPE_LEFT,
+      imageUrl: passengerRequest.carpool.event?.thumbnailUrl ?? '',
+      data: {
+        carpoolId: carpoolId,
+      },
+      link: '/carpool/' + carpoolId,
+    });
 
     return { message: 'You have left the ride' };
   }
 
-  // 🚕 Remove passenger as driver
+  // 🚕 Remove passenger as a driver
   async removePassenger(driverId: string, requestId: string) {
     const passenger = await this.prisma.carpoolPassenger.findUnique({
       where: { id: requestId },
       include: {
-        carpool: true,
+        carpool: {
+          select: {
+            driverId: true,
+            event: true,
+          },
+        },
       },
     });
 
@@ -566,10 +813,28 @@ export class CarpoolService {
       data: { status: 'REMOVED' },
     });
 
-    await this.prisma.carpool.update({
-      where: { id: passenger.carpoolId },
-      data: { availableSeats: { increment: 1 } },
+    await this.pubsubService.publishCarpoolUpdate(
+      'passenger_removed',
+      passenger.carpoolId,
+      {},
+      passenger.userId,
+    );
+
+    await this.notificationService.createNotification({
+      recipientIds: [passenger.userId],
+      title: notificationConstants.CARPOOL_REQUEST_TITLE_REMOVED,
+      message: notificationConstants.CARPOOL_REQUEST_MESSAGE_REMOVED,
+      type: notificationConstants.CARPOOL_NOTIFICATION_TYPE_REMOVED,
+      imageUrl: passenger.carpool.event?.thumbnailUrl ?? '',
+      data: {
+        carpoolId: passenger.carpoolId,
+      },
+      link: '/carpool/' + passenger.carpoolId,
     });
+    // await this.prisma.carpool.update({
+    //   where: { id: passenger.carpoolId },
+    //   data: { availableSeats: { increment: 1 } },
+    // });
 
     return { message: 'Passenger removed successfully' };
   }
@@ -749,6 +1014,7 @@ export class CarpoolService {
               id: true,
               title: true,
               imageUrl: true,
+              startDate: true,
             },
           },
           passengers: true,
@@ -785,6 +1051,7 @@ export class CarpoolService {
               id: true,
               title: true,
               imageUrl: true,
+              startDate: true,
             },
           },
           passengers: true,
@@ -799,6 +1066,76 @@ export class CarpoolService {
     }
 
     return allCarpools.slice(0, maxResults);
+  }
+
+  // New method for chat access details
+  async getCarpoolChatAccess(carpoolId: string, userId: string) {
+    // First get the basic carpool details using your existing method
+    const carpool = await this.findOne(carpoolId, userId);
+
+    if (!carpool) {
+      throw new NotFoundException('Carpool not found');
+    }
+
+    // Check if user can access chat
+    const now = new Date();
+    const isExpired = carpool.expiresAt && new Date(carpool.expiresAt) < now;
+    const isActive = carpool.status === 'ACTIVE' && !isExpired;
+
+    const isDriver = carpool.driverId === userId;
+    const isPassenger = carpool.passengers.some(
+      (p) => p.userId === userId && p.status === 'ACCEPTED',
+    );
+    const isMember = isDriver || isPassenger;
+
+    const canChat = isActive && isMember;
+
+    let reason = '';
+    if (!isActive) {
+      if (carpool.status !== 'ACTIVE') {
+        reason = `This carpool is ${carpool.status.toLowerCase()}`;
+      } else if (isExpired) {
+        reason = 'This carpool chat has expired';
+      }
+    } else if (!isMember) {
+      reason = 'You are not a member of this carpool';
+    }
+
+    // Transform passengers to match expected format
+    const passengers = carpool.passengers
+      .filter((p) => p.status === 'ACCEPTED')
+      .map((p) => ({
+        id: p.user.id,
+        name: p.user.username,
+        avatar: p.user.profilePicUrlTN,
+        status: p.status as 'ACCEPTED',
+      }));
+
+    return {
+      id: carpool.id,
+      name: `Carpool to ${carpool.event?.title || 'Event'}`,
+      status: carpool.status as
+        | 'ACTIVE'
+        | 'COMPLETED'
+        | 'CANCELLED'
+        | 'EXPIRED',
+      expiresAt: carpool.expiresAt,
+      driverId: carpool.driverId,
+      driver: {
+        id: carpool.driver.id,
+        name: carpool.driver.username,
+        avatar: carpool.driver.profilePicUrlTN,
+      },
+      passengers,
+      event: carpool.event
+        ? {
+            id: carpool.event.id,
+            name: carpool.event.title,
+          }
+        : undefined,
+      canChat,
+      reason: canChat ? undefined : reason,
+    };
   }
 
   private getDistanceFromLatLonInKm(

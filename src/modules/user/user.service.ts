@@ -1,50 +1,51 @@
-import { Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { CompleteProfileDto } from './dto/complete-profile-dto';
 import { EditBioDto } from './dto/edit-bio-dto';
 import { MediaService } from '../media/media.service';
 
-
 @Injectable()
 export class UserService {
-    constructor(private prisma: PrismaService,
-                private mediaService: MediaService
-      ) {}
+  constructor(
+    private prisma: PrismaService,
+    private mediaService: MediaService,
+  ) {}
 
-    async completeProfile(userId: string, dto: CompleteProfileDto) {
-      // Check if username is already taken
-      const usernameExists = await this.prisma.user.findUnique({
-        where: { username: dto.username.toLowerCase().trim() },
-      });
-      if (usernameExists) {
-        throw new UnauthorizedException('Username already taken');
-      }
-  
-      return await this.prisma.user.update({
-        where: { id: userId },
-        data: {
-          username: dto.username,
-          profilePicUrl: dto.profilePicUrl,
-          phoneNumber: dto.phoneNumber,
-          birthDate: dto.birthDate  && new Date(dto.birthDate),
-          nationality: dto.nationality,
-          gender: dto.gender,
-          isProfileComplete: true,
-        },
-      });
+  async completeProfile(userId: string, dto: CompleteProfileDto) {
+    // Check if username is already taken
+    const usernameExists = await this.prisma.user.findUnique({
+      where: { username: dto.username.toLowerCase().trim() },
+    });
+    if (usernameExists) {
+      throw new UnauthorizedException('Username already taken');
     }
 
-    async editUserBio(userId: string, dto: EditBioDto) {
-     
-      return await this.prisma.user.update({
-        where: { id: userId },
-        data: {
-          bio: dto.bio,
+    return await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        username: dto.username,
+        profilePicUrl: dto.profilePicUrl,
+        phoneNumber: dto.phoneNumber,
+        birthDate: dto.birthDate && new Date(dto.birthDate),
+        // nationality: dto.nationality,
+        // gender: dto.gender,
+        isProfileComplete: true,
+      },
+    });
+  }
 
-        },
-      })
-    }
-
+  async editUserBio(userId: string, dto: EditBioDto) {
+    return await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        bio: dto.bio,
+      },
+    });
+  }
 
   async getAllUsers() {
     return this.prisma.user.findMany();
@@ -55,11 +56,6 @@ export class UserService {
       where: { email },
     });
   }
-
-
-  
-
-
 
   async getPublicProfile(targetUserId: string, viewerId?: string) {
     const user = await this.prisma.user.findUnique({
@@ -110,27 +106,24 @@ export class UserService {
       isFollowing,
       communities: user.communityFollows.map((cf) => cf.community),
       similarCommunities,
-      profilePicUrl: user.profilePicUrl
-
+      profilePicUrl: user.profilePicUrl,
     };
   }
 
   async updateProfilePicture(userId: string, file: Express.Multer.File) {
-    const { url, thumbnailUrl } = await this.mediaService.uploadFile(file, `users/${userId}`);
-  
+    const { url, thumbnailUrl } = await this.mediaService.uploadFile(
+      file,
+      `users/${userId}`,
+    );
 
     await this.prisma.user.update({
       where: { id: userId },
       data: {
-        profilePicUrl:url,
-        profilePicUrlTN: thumbnailUrl
+        profilePicUrl: url,
+        profilePicUrlTN: thumbnailUrl,
       },
-    })
-  
+    });
+
     return { url, thumbnailUrl };
   }
-
-
 }
-
-

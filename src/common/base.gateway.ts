@@ -9,6 +9,7 @@ import {
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
 import { SocketAuthMiddleware } from './middleware/ws.mw';
+import { PrismaService } from 'src/prisma/prisma.service';
 
 export abstract class BaseGateway
   implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
@@ -60,5 +61,107 @@ export abstract class BaseGateway
       this.emitError(client, 'Unauthorized');
     }
     return userId;
+  }
+
+  protected async validateCarpoolAccess(
+    client: Socket,
+    carpoolId: string,
+    prisma: PrismaService,
+  ): Promise<boolean> {
+    const userId = this.validateUser(client);
+    if (!userId) {
+      //this.emitError(client, 'Unauthorized');
+      return false;
+    }
+
+    try {
+      console.log(userId, carpoolId);
+      const validationResult = await this.validateCarpoolAccessDetailed(
+        prisma,
+        userId,
+        carpoolId,
+      );
+
+      if (!validationResult.hasAccess) {
+        console.log(validationResult, 'this is result');
+        this.emitError(
+          client,
+          validationResult.reason || 'No access to this carpool',
+        );
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      this.logger.error(`Error validating carpool access: ${error.message}`);
+      this.emitError(client, 'Error validating access');
+      return false;
+    }
+  }
+
+  private async validateCarpoolAccessDetailed(
+    prisma: PrismaService,
+    userId: string,
+    carpoolId: string,
+  ): Promise<{ hasAccess: boolean; reason?: string }> {
+    // Your validation logic here
+    const carpool = await prisma.carpool.findUnique({
+      where: { id: carpoolId },
+    });
+
+    if (!carpool) {
+      return { hasAccess: false, reason: 'Carpool not found' };
+    }
+
+    if (carpool.status !== 'ACTIVE') {
+      return { hasAccess: false, reason: 'Carpool is not active' };
+    }
+
+    if (carpool.expiresAt && carpool.expiresAt < new Date()) {
+      return { hasAccess: false, reason: 'Carpool has expired' };
+    }
+
+    // Check user access...
+    const isDriver = carpool.driverId === userId;
+    const isPassenger = await this.isAcceptedPassenger(
+      prisma,
+      userId,
+      carpoolId,
+    );
+
+    if (!isDriver && !isPassenger) {
+      return {
+        hasAccess: false,
+        reason: 'You are not a member of this carpool',
+      };
+    }
+
+    return { hasAccess: true };
+  }
+
+  private async isAcceptedPassenger(
+    prisma: PrismaService,
+    userId: string,
+    carpoolId: string,
+  ): Promise<boolean> {
+    // Example Prisma query - adjust based on your schema
+    const carpool = await prisma.carpool.findUnique({
+      where: { id: carpoolId },
+      include: {
+        passengers: {
+          where: { userId, status: 'ACCEPTED' },
+        },
+        // OR if you have a separate CarpoolMember table:
+        // carpoolMembers: {
+        //   where: { userId },
+        // },
+      },
+    });
+
+    if (!carpool) return false;
+
+    // Check based on your schema
+    return carpool.passengers.length > 0; // If members is an array of users
+    // OR: return carpool.carpoolMembers.length > 0; // If separate join table
   }
 }

@@ -4,10 +4,19 @@ import { TransactionReferenceController } from './transaction-reference.controll
 import { PrismaModule } from 'src/prisma/prisma.module';
 import { PaystackService } from '../paystack/paystack.service';
 import { MailModule } from '../mail/mail.module';
+import { DonationModule } from '../donation/donation.module';
+import { TicketModule } from '../ticket/ticket.module';
+import { NotificationModule } from '../notification/notification.module';
 
 @Module({
-  imports: [PrismaModule,MailModule],
+  imports: [
+    PrismaModule,
+    MailModule,
+    DonationModule,
+    TicketModule,
+    NotificationModule,
+  ],
   controllers: [TransactionReferenceController],
-  providers: [TransactionReferenceService,PaystackService],
+  providers: [TransactionReferenceService, PaystackService],
 })
 export class TransactionReferenceModule {}

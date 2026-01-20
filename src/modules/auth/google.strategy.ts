@@ -48,6 +48,7 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
           email: user.email,
           redirectUrl, // Pass redirect URL along
           hasPreferences: user.hasPreferences,
+          isProfileComplete: user.isProfileComplete,
         });
       }
 
@@ -66,6 +67,7 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
           email: updatedUser.email,
           redirectUrl,
           hasPreferences: updatedUser.hasPreferences,
+          isProfileComplete: user.isProfileComplete,
         });
       }
 
@@ -83,6 +85,7 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
           email: newUser.email,
           redirectUrl,
           hasPreferences: newUser.hasPreferences,
+          isProfileComplete: newUser.isProfileComplete,
         });
       }
 

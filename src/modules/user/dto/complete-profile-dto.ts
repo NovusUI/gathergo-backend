@@ -1,12 +1,19 @@
 // src/users/dtos/complete-profile.dto.ts
 
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsNotEmpty, Matches, IsOptional, IsDateString, IsEnum, IsLowercase } from 'class-validator';
+import {
+  IsNotEmpty,
+  Matches,
+  IsOptional,
+  IsDateString,
+  IsEnum,
+  IsLowercase,
+} from 'class-validator';
 
 export enum Gender {
-    MALE = 'MALE',
-    FEMALE = 'FEMALE',
-    OTHER = 'OTHER',
+  MALE = 'MALE',
+  FEMALE = 'FEMALE',
+  OTHER = 'OTHER',
 }
 
 export class CompleteProfileDto {
@@ -14,7 +21,6 @@ export class CompleteProfileDto {
     example: 'Adebola Aderemilateef',
     description: 'user fullname',
   })
-
   @IsNotEmpty()
   fullName: string;
 
@@ -24,7 +30,8 @@ export class CompleteProfileDto {
   })
   @IsNotEmpty()
   @Matches(/^[a-z0-9_.]+$/, {
-    message: 'Username can only contain letters, numbers, underscores, and dots',
+    message:
+      'Username can only contain letters, numbers, underscores, and dots',
   })
   username: string;
 
@@ -41,11 +48,11 @@ export class CompleteProfileDto {
   @IsDateString()
   birthDate: string;
 
-  @ApiProperty({ example: 'Nigeria' })
-  @IsNotEmpty()
-  nationality: string;
+  // @ApiProperty({ example: 'Nigeria' })
+  // @IsNotEmpty()
+  // nationality: string;
 
-  @ApiPropertyOptional({ enum: Gender, example: Gender.MALE })
-  @IsEnum(Gender)
-  gender: Gender;
+  // @ApiPropertyOptional({ enum: Gender, example: Gender.MALE })
+  // @IsEnum(Gender)
+  // gender: Gender;
 }
