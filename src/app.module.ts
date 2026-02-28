@@ -34,6 +34,7 @@ import { BackgroundNotificationsModule } from './modules/background-notification
 import { RegistrationModule } from './modules/registration/registration.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { ScannerModule } from './modules/scanner/scanner.modules';
+import { RateLimitGuard } from './common/guards/rate-limit.guard';
 
 @Module({
   imports: [
@@ -76,7 +77,7 @@ import { ScannerModule } from './modules/scanner/scanner.modules';
     ScheduleModule.forRoot(),
   ],
   controllers: [AppController],
-  providers: [AppService, PrismaService],
+  providers: [AppService, PrismaService, RateLimitGuard],
   exports: [PrismaService],
 })
 export class AppModule {}

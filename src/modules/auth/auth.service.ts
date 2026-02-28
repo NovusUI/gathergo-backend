@@ -177,18 +177,16 @@ export class AuthService {
     }
 
     const token = crypto.randomBytes(32).toString('hex');
-    const hashedToken = await bcrypt.hash(token, 12);
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
     await this.prisma.user.update({
       where: { email: dto.email },
       data: {
-        resetToken: hashedToken,
+        resetToken: tokenHash,
         resetTokenExpiry: new Date(Date.now() + 1000 * 60 * 60), // 1 hour
       },
     });
-
-    // TODO: send email (for now, just log)
-    console.log(`Reset token (send via email): ${token}`);
+    // TODO: send token via email channel (do not log secrets)
 
     return {
       message: 'If that email exists, you will receive a password reset link',
@@ -196,31 +194,34 @@ export class AuthService {
   }
 
   async resetPassword(dto: ResetPasswordDto) {
-    const users = await this.prisma.user.findMany();
+    const tokenHash = crypto
+      .createHash('sha256')
+      .update(dto.token)
+      .digest('hex');
 
-    for (const user of users) {
-      const isMatch = await bcrypt.compare(dto.token, user.resetToken || '');
-      if (
-        isMatch &&
-        user.resetTokenExpiry &&
-        user.resetTokenExpiry > new Date()
-      ) {
-        const hashedPassword = await bcrypt.hash(dto.newPassword, 12);
+    const user = await this.prisma.user.findFirst({
+      where: {
+        resetToken: tokenHash,
+        resetTokenExpiry: { gt: new Date() },
+      },
+    });
 
-        await this.prisma.user.update({
-          where: { id: user.id },
-          data: {
-            password: hashedPassword,
-            resetToken: null,
-            resetTokenExpiry: null,
-          },
-        });
-
-        return { message: 'Password reset successful' };
-      }
+    if (!user) {
+      throw new ForbiddenException('Invalid or expired token');
     }
 
-    throw new ForbiddenException('Invalid or expired token');
+    const hashedPassword = await bcrypt.hash(dto.newPassword, 12);
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        password: hashedPassword,
+        resetToken: null,
+        resetTokenExpiry: null,
+      },
+    });
+
+    return { message: 'Password reset successful' };
   }
 
   async handleGoogleLogin(googleUser: {
