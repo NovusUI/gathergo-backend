@@ -9,12 +9,14 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateDonationDto } from './dto/create-donation.dto';
 import { NotificationService } from '../notification/notification.service';
 import { notificationConstants } from 'src/common/constants';
+import { FeedIntegrationService } from '../feed/feed-integration.service';
 
 @Injectable()
 export class DonationService {
   constructor(
     private prisma: PrismaService,
     private notificationService: NotificationService,
+    private feedIntegrationService: FeedIntegrationService,
   ) {}
 
   async createDonation(
@@ -41,7 +43,7 @@ export class DonationService {
 
     // Note: The @Min(50000) decorator in DTO already validates minimum amount
     // But we can double-check here for safety
-    if (amount < 50000) {
+    if (amount < 500) {
       throw new BadRequestException(
         'Minimum donation amount is ₦50,000 (50000 kobo)',
       );
@@ -93,6 +95,11 @@ export class DonationService {
         },
         link: '/event/' + eventId,
       })
+      .then(() => {});
+
+    // Generate feed for donation
+    this.feedIntegrationService
+      .onDonationMade(eventId, userId, result.id, amount, isAnonymous)
       .then(() => {});
 
     return this.formatDonationResponse(result);

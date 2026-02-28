@@ -7,12 +7,14 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { nanoid } from 'nanoid';
 import { NotificationService } from '../notification/notification.service';
 import { notificationConstants } from 'src/common/constants';
+import { FeedIntegrationService } from '../feed/feed-integration.service';
 
 @Injectable()
 export class TicketService {
   constructor(
     private prisma: PrismaService,
     private notificationService: NotificationService,
+    private feedIntegrationService: FeedIntegrationService,
   ) {}
 
   async create(
@@ -27,6 +29,7 @@ export class TicketService {
       ticketName: string;
     }[] = [];
 
+    const createdTicketIds: string[] = [];
     for (const item of paidTickets) {
       const eventTicket = await this.prisma.eventTicket.findUnique({
         where: { id: item.eventTicketId },
@@ -62,11 +65,37 @@ export class TicketService {
         })),
       });
 
+      // Get the created ticket IDs
+      const createdTickets = await this.prisma.ticket.findMany({
+        where: {
+          eventTicketId: item.eventTicketId,
+          userId: transaction.userId,
+          transactionId: transaction.id,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: availableQty,
+      });
+
+      createdTicketIds.push(...createdTickets.map((t) => t.id));
+
       // Update stock
       await this.prisma.eventTicket.update({
         where: { id: item.eventTicketId },
         data: { sold: { increment: availableQty } },
       });
+
+      for (const ticket of createdTickets) {
+        this.feedIntegrationService
+          .onTicketPurchased(
+            eventId,
+            transaction.userId,
+            ticket.id,
+            item.eventTicketId,
+          )
+          .then((data) => {
+            console.log(data);
+          });
+      }
 
       if (availableQty < item.quantity) {
         unavailableTickets.push({

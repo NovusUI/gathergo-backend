@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Post,
   Query,
@@ -19,6 +20,7 @@ import {
 } from '@nestjs/swagger';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { InitiateDonationDto } from './dto/initiate-donation.dto';
+import { Public } from 'src/common/decorators/public.decorator';
 
 @Controller('transaction-reference')
 @ApiTags('Transaction References')
@@ -67,10 +69,14 @@ export class TransactionReferenceController {
     );
   }
 
-  @Get('verify')
+  @Post('verify')
+  @Public()
   @ApiOperation({ summary: 'Verify transaction after Paystack callback' })
-  async verifyTransaction(@Query('reference') reference: string) {
-    return this.transactionReferenceService.verifyPayment(reference);
+  async verifyTransaction(
+    @Headers('x-paystack-signature') signature: string,
+    @Body() body: any,
+  ) {
+    return this.transactionReferenceService.verifyPayment(body, signature);
   }
 
   @Get('status/:id')

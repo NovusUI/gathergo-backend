@@ -261,6 +261,19 @@ export class EventService {
     });
     if (!event) throw new NotFoundException('Event not found');
 
+    // Calculate total donations for this event
+    const totalDonationsResult = await this.prisma.donation.aggregate({
+      where: {
+        eventId: id,
+        status: 'active', // Assuming you have a status field
+      },
+      _sum: {
+        amount: true,
+      },
+    });
+
+    const totalDonations = totalDonationsResult._sum.amount || 0;
+
     // ✅ Check if requester follows driver
     const isFollowingCreator = await this.prisma.userFollow.findUnique({
       where: {
@@ -271,7 +284,7 @@ export class EventService {
       },
     });
 
-    // // ✅ Check if driver follows requester
+    // ✅ Check if driver follows requester
     const isFollowedByCreator = await this.prisma.userFollow.findUnique({
       where: {
         followerId_followingId: {
@@ -283,6 +296,7 @@ export class EventService {
 
     return {
       ...event,
+      totalDonations, // Add total donations in kobo (or whatever unit your amount is)
       isFollowingCreator: Boolean(isFollowingCreator),
       isFollowedByCreator: Boolean(isFollowedByCreator),
     };

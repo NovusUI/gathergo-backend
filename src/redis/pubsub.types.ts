@@ -23,3 +23,10 @@ export type PubSubNotification = {
     read: boolean;
   };
 };
+
+export type PubSubFeedMessage = {
+  type: 'feed:new' | 'feed:updated' | 'feed:deleted' | 'feed:pinned';
+  eventId: string;
+  feed: any;
+  userId?: string; // Optional: who triggered the action
+};

@@ -24,6 +24,7 @@ import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { RespondRequestDto } from './dto/respond-request.dto';
 import { QueryCarpoolDto } from './dto/query-carpool.dto';
 import { ForYouCarpoolDto } from './dto/foryou-carpool.dto';
+import { EventCarpoolQueryDto } from './dto/event-carpool-query.dto';
 
 @ApiTags('Carpool')
 @Controller('carpool')
@@ -60,6 +61,35 @@ export class CarpoolController {
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   async getActiveCarpools(@Query() query: QueryCarpoolDto) {
     return this.carpoolService.getActiveCarpools(query);
+  }
+
+  @Get('event/:eventId/paginated')
+  @ApiOperation({ summary: 'Get paginated event carpools with ranking' })
+  @ApiQuery({ name: 'latitude', required: false })
+  @ApiQuery({ name: 'longitude', required: false })
+  @ApiQuery({
+    name: 'maxDistanceKm',
+    required: false,
+    type: Number,
+    example: 10,
+  })
+  @ApiQuery({
+    name: 'filter',
+    required: false,
+    enum: ['all', 'close_to_you', 'followed'],
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'pageSize', required: false, type: Number, example: 20 })
+  async getPaginatedEventCarpools(
+    @CurrentUser('id') userId: string,
+    @Param('eventId') eventId: string,
+    @Query() query: EventCarpoolQueryDto,
+  ) {
+    return this.carpoolService.getPaginatedEventCarpools(
+      userId,
+      eventId,
+      query,
+    );
   }
 
   @ApiOperation({ summary: 'Get carpool' })

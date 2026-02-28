@@ -7,6 +7,9 @@ import { MailModule } from '../mail/mail.module';
 import { DonationModule } from '../donation/donation.module';
 import { TicketModule } from '../ticket/ticket.module';
 import { NotificationModule } from '../notification/notification.module';
+import { RegistrationService } from '../registration/registration.service';
+import { FeedIntegrationService } from '../feed/feed-integration.service';
+import { FeedService } from '../feed/feed.service';
 
 @Module({
   imports: [
@@ -17,6 +20,12 @@ import { NotificationModule } from '../notification/notification.module';
     NotificationModule,
   ],
   controllers: [TransactionReferenceController],
-  providers: [TransactionReferenceService, PaystackService],
+  providers: [
+    TransactionReferenceService,
+    PaystackService,
+    RegistrationService,
+    FeedIntegrationService,
+    FeedService,
+  ],
 })
 export class TransactionReferenceModule {}

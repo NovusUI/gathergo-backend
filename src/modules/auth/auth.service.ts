@@ -1,6 +1,7 @@
 import {
   ForbiddenException,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -8,19 +9,23 @@ import { SignupDto } from './dtos/signup.dto';
 import { LoginDto } from './dtos/login.dto';
 import { GoogleLoginDto } from './dtos/google-login.dto';
 import { VerifyUsernameDto } from './dtos/verify-username.dto';
+import { PhoneFirebaseTokenDto } from './dtos/phone-firebase-token.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 import { ResetPasswordDto } from './dtos/reset-password.dto';
 import { ForgotPasswordDto } from './dtos/forgot-password.dto';
 import { OAuth2Client } from 'google-auth-library';
+import { FirebaseService } from '../firebase/firebase.service';
 
 @Injectable()
 export class AuthService {
   private googleClient: OAuth2Client;
+  private readonly logger = new Logger(AuthService.name);
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
+    private readonly firebaseService: FirebaseService,
   ) {
     this.googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
   }
@@ -48,12 +53,16 @@ export class AuthService {
     });
 
     // 4️⃣ Create JWT token
-    const token = await this.generateToken(user.id, user.email, {
+    const token = await this.generateToken(user.id, user.email, user.username || undefined, {
       secret: process.env.JWT_SECRET,
       expiresIn: '15m',
     });
 
-    const refreshToken = await this.generateToken(user.id, user.email);
+    const refreshToken = await this.generateToken(
+      user.id,
+      user.email,
+      user.username || undefined,
+    );
 
     await this.prisma.refreshToken.create({
       data: {
@@ -81,7 +90,13 @@ export class AuthService {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
-    const payload = { sub: tokenInDb.user.id };
+    const payload = {
+      sub: tokenInDb.user.id,
+      email: tokenInDb.user.email,
+      username: tokenInDb.user.username,
+      hasPreferences: tokenInDb.user.hasPreferences,
+      isProfileComplete: tokenInDb.user.isProfileComplete,
+    };
 
     const accessToken = this.jwtService.sign(payload, {
       secret: process.env.JWT_SECRET,
@@ -214,12 +229,17 @@ export class AuthService {
     hasPrefrences: boolean;
     isProfileComplete: boolean;
   }) {
-    // Generate JWT
-    console.log(googleUser, 'google user');
+    const dbUser = await this.prisma.user.findUnique({
+      where: { id: googleUser.id },
+      select: {
+        username: true,
+      },
+    });
 
     const tokens = await this.login({
       id: googleUser.id,
       email: googleUser.email,
+      username: dbUser?.username,
       hasPreferences: googleUser.hasPrefrences,
       isProfileComplete: googleUser.isProfileComplete,
     });
@@ -228,6 +248,99 @@ export class AuthService {
       message: 'Google login successful',
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
+    };
+  }
+
+  async loginWithFirebasePhone(dto: PhoneFirebaseTokenDto) {
+    const normalizedPhone = dto.phoneNumber.trim();
+    const devBypassEnabled = process.env.AUTH_PHONE_DEV_BYPASS === 'true';
+    const isProduction = process.env.NODE_ENV === 'production';
+
+    if (devBypassEnabled && isProduction) {
+      throw new ForbiddenException(
+        'AUTH_PHONE_DEV_BYPASS cannot be enabled in production',
+      );
+    }
+
+    let decodedToken: {
+      uid: string;
+      phone_number?: string;
+      email?: string;
+    };
+
+    if (!dto.verificationArtifact?.idToken && !devBypassEnabled) {
+      throw new UnauthorizedException(
+        'verificationArtifact.idToken is required for Firebase phone auth',
+      );
+    }
+
+    if (dto.verificationArtifact?.idToken) {
+      decodedToken = await this.firebaseService
+        .getApp()
+        .auth()
+        .verifyIdToken(dto.verificationArtifact.idToken);
+    } else {
+      if (!dto.verificationArtifact?.smsCode) {
+        throw new UnauthorizedException(
+          'smsCode is required when using AUTH_PHONE_DEV_BYPASS',
+        );
+      }
+
+      this.logger.warn(
+        `AUTH_PHONE_DEV_BYPASS active: skipping Firebase ID token verification for ${normalizedPhone}`,
+      );
+
+      const digits = normalizedPhone.replace(/[^\d]/g, '');
+      decodedToken = {
+        uid: `dev-phone-${digits}`,
+        phone_number: normalizedPhone,
+      };
+    }
+
+    if (!decodedToken?.phone_number) {
+      throw new UnauthorizedException(
+        'Verified Firebase token does not include a phone number',
+      );
+    }
+
+    if (decodedToken.phone_number !== normalizedPhone) {
+      throw new UnauthorizedException(
+        'Phone number mismatch between payload and verified token',
+      );
+    }
+
+    let user = await this.prisma.user.findFirst({
+      where: { phoneNumber: normalizedPhone },
+    });
+
+    if (!user) {
+      const firebaseUid = decodedToken.uid;
+      const emailFromToken = decodedToken.email?.toLowerCase().trim();
+      const fallbackEmail = `${firebaseUid}@phone.gathergo.local`;
+      const emailToUse = emailFromToken || fallbackEmail;
+
+      user = await this.prisma.user.create({
+        data: {
+          email: emailToUse,
+          googleId: firebaseUid,
+          phoneNumber: normalizedPhone,
+          isVerified: true,
+        },
+      });
+    } else if (!user.isVerified) {
+      user = await this.prisma.user.update({
+        where: { id: user.id },
+        data: { isVerified: true },
+      });
+    }
+
+    const { accessToken, refreshToken } = await this.login(user);
+
+    return {
+      message: 'Phone authentication successful',
+      accessToken,
+      refreshToken,
+      user,
     };
   }
 
@@ -244,6 +357,7 @@ export class AuthService {
     const payload = {
       sub: user.id,
       email: user.email,
+      username: user.username,
       hasPreferences: user.hasPreferences,
       isProfileComplete: user.isProfileComplete,
     };
@@ -269,8 +383,8 @@ export class AuthService {
     return { accessToken, refreshToken, user };
   }
   // TOKEN HELPER
-  async generateToken(userId: string, email: string, option?) {
-    const payload = { sub: userId, email };
+  async generateToken(userId: string, email: string, username?: string, option?) {
+    const payload = { sub: userId, email, username };
     return option
       ? this.jwtService.sign(payload, option)
       : this.jwtService.sign(payload);
@@ -302,7 +416,7 @@ export class AuthService {
         },
       });
 
-      const payload = { sub: user.id, email };
+      const payload = { sub: user.id, email, username: user.username };
 
       const accessToken = this.jwtService.sign(payload, {
         secret: process.env.JWT_SECRET,

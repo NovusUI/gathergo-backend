@@ -7,7 +7,11 @@ import {
 } from '@nestjs/common';
 import Redis from 'ioredis';
 import { Server } from 'socket.io';
-import { PubSubMessage, PubSubNotification } from './pubsub.types';
+import {
+  PubSubFeedMessage,
+  PubSubMessage,
+  PubSubNotification,
+} from './pubsub.types';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -39,8 +43,9 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
         this.subscriber.subscribe('chat'),
         this.subscriber.subscribe('typing'),
         this.subscriber.subscribe('notifications'),
-        this.subscriber.subscribe('posts'), // 👈 NEW
+        this.subscriber.subscribe('posts'),
         this.subscriber.subscribe('carpool_updates'),
+        this.subscriber.subscribe('feed'),
       ]);
 
       this.subscriber.on('message', this.messageHandler.bind(this));
@@ -65,8 +70,10 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
       } else if (channel === 'posts') {
         this.handlePostMessage(payload);
       } else if (channel === 'carpool_updates') {
-        // 👈 NEW: Handle carpool updates
         this.handleCarpoolUpdateMessage(payload);
+      } else if (channel === 'feed') {
+        // 👈 ADD THIS
+        this.handleFeedMessage(payload);
       } else {
         this.handleStandardMessage(payload as PubSubMessage);
       }
@@ -484,6 +491,44 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private handleFeedMessage(payload: PubSubFeedMessage) {
+    const { type, eventId, feed, userId } = payload;
+
+    try {
+      const timestamp = new Date().toISOString();
+      const feedRoom = `event:${eventId}:feed`;
+      const legacyEventRoom = `event:${eventId}`;
+
+      // Canonical feed socket contract consumed by gathergo-app.
+      if (type === 'feed:new' && feed) {
+        this.io.to(feedRoom).emit('newFeed', feed);
+      } else if (type === 'feed:pinned' && feed) {
+        this.io.to(feedRoom).emit('pinnedFeedUpdate', feed);
+      } else if (type === 'feed:updated' && feed) {
+        // Re-emit as newFeed so clients can upsert by id.
+        this.io.to(feedRoom).emit('newFeed', feed);
+      } else if (type === 'feed:deleted') {
+        this.io
+          .to(feedRoom)
+          .emit('feedDeleted', { eventId, feedId: feed?.id || null });
+      }
+
+      // Backward-compatible legacy event payload.
+      this.io.to(legacyEventRoom).emit(type, {
+        feed,
+        userId,
+        timestamp,
+      });
+
+      this.logger.log(`Feed ${type} broadcasted for event ${eventId}`);
+    } catch (error) {
+      this.logger.error(`Error handling feed message: ${type}`, {
+        eventId,
+        error: error.stack,
+      });
+    }
+  }
+
   async publish(data: PubSubMessage) {
     try {
       const channel = data.type === 'typing' ? 'typing' : 'chat';
@@ -568,6 +613,33 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  async publishFeed(
+    type: 'feed:new' | 'feed:updated' | 'feed:deleted' | 'feed:pinned',
+    eventId: string,
+    feed: any,
+    userId?: string,
+  ) {
+    try {
+      const payload: PubSubFeedMessage = {
+        type,
+        eventId,
+        feed,
+        userId,
+      };
+
+      await this.publisher.publish('feed', JSON.stringify(payload));
+      this.logger.log(
+        `Published ${type} for feed ${feed.id} in event ${eventId}`,
+      );
+    } catch (error) {
+      this.logger.error('Failed to publish feed message', {
+        type,
+        eventId,
+        error: error.stack,
+      });
+      throw error;
+    }
+  }
   async onModuleDestroy() {
     try {
       // Clear all typing timeouts

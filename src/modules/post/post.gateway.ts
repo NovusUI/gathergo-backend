@@ -26,17 +26,17 @@ export class PostGateway extends BaseGateway {
 
   // No need to override handleConnection - base class handles user room joining automatically
 
-  @SubscribeMessage('joinEventFeed')
-  async handleJoinEventFeed(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { eventId: string },
-  ) {
-    const userId = this.validateUser(client);
-    if (!userId) return;
+  // @SubscribeMessage('joinEventFeed')
+  // async handleJoinEventFeed(
+  //   @ConnectedSocket() client: Socket,
+  //   @MessageBody() data: { eventId: string },
+  // ) {
+  //   const userId = this.validateUser(client);
+  //   if (!userId) return;
 
-    client.join(`event:${data.eventId}`);
-    this.logger.log(`Client ${client.id} joined event:${data.eventId}`);
-  }
+  //   client.join(`event:${data.eventId}`);
+  //   this.logger.log(`Client ${client.id} joined event:${data.eventId}`);
+  // }
 
   // ... (all other methods remain the same as previous refactor)
   @SubscribeMessage('fetchNewPosts')

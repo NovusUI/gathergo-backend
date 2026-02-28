@@ -10,6 +10,10 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { RespondRequestDto } from './dto/respond-request.dto';
 import { QueryCarpoolDto } from './dto/query-carpool.dto';
 import { ForYouCarpoolDto } from './dto/foryou-carpool.dto';
+import {
+  EventCarpoolFilter,
+  EventCarpoolQueryDto,
+} from './dto/event-carpool-query.dto';
 import { startOfToday } from 'date-fns';
 import { getRandomNote } from 'src/utils';
 import { JoinCarpoolDto } from './dto/join-carpool.dto';
@@ -41,6 +45,30 @@ interface CarpoolWithDetails {
   _count?: {
     passengers?: number;
   };
+}
+
+interface RankedCarpoolRow {
+  id: string;
+  driverId: string;
+  eventId: string;
+  origin: string;
+  destination: string | null;
+  departureTime: string;
+  availableSeats: number;
+  pricePerSeat: number;
+  description: string | null;
+  note: string | null;
+  status: string;
+  expiresAt: Date;
+  createdAt: Date;
+  driverUsername: string | null;
+  driverProfilePicUrlTN: string | null;
+  driverIsVerified: boolean;
+  eventTitle: string | null;
+  eventImageUrl: string | null;
+  acceptedPassengers: number;
+  isFollowedOwner: boolean;
+  distanceKm: number | null;
 }
 
 @Injectable()
@@ -906,6 +934,240 @@ export class CarpoolService {
       page,
       pageSize: take,
       totalPages: Math.ceil(carpools.length / take),
+    };
+  }
+
+  async getPaginatedEventCarpools(
+    userId: string,
+    eventId: string,
+    query: EventCarpoolQueryDto,
+  ) {
+    const {
+      latitude,
+      longitude,
+      page = 1,
+      pageSize = 20,
+      maxDistanceKm = 10,
+      filter,
+    } = query;
+    const hasCoordinates = latitude != null && longitude != null;
+    const selectedFilter = filter ?? EventCarpoolFilter.ALL;
+    const skip = (page - 1) * pageSize;
+    const maxDistanceMeters = maxDistanceKm * 1000;
+
+    if ((latitude == null) !== (longitude == null)) {
+      throw new BadRequestException(
+        'Latitude and longitude must be provided together',
+      );
+    }
+
+    if (selectedFilter === EventCarpoolFilter.CLOSE_TO_YOU && !hasCoordinates) {
+      throw new BadRequestException(
+        'Latitude and longitude are required for close_to_you filter',
+      );
+    }
+
+    const event = await this.prisma.event.findUnique({
+      where: { id: eventId },
+      select: { id: true },
+    });
+
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+
+    const filterCondition =
+      selectedFilter === EventCarpoolFilter.CLOSE_TO_YOU
+        ? `AND c."startPoint" IS NOT NULL
+           AND $3::boolean = true
+           AND ST_DistanceSphere(
+             c."startPoint",
+             ST_SetSRID(ST_MakePoint($5, $4), 4326)
+           ) <= $6`
+        : selectedFilter === EventCarpoolFilter.FOLLOWED
+          ? 'AND uf.id IS NOT NULL'
+          : '';
+
+    const totalResult =
+      selectedFilter === EventCarpoolFilter.CLOSE_TO_YOU
+        ? await this.prisma.$queryRawUnsafe<Array<{ total: bigint }>>(
+            `
+            SELECT COUNT(*)::bigint AS total
+            FROM "Carpool" c
+            LEFT JOIN "UserFollow" uf
+              ON uf."followerId" = $1
+             AND uf."followingId" = c."driverId"
+            WHERE c."eventId" = $2
+              AND c.status = 'ACTIVE'
+              AND c."isDeleted" = false
+              AND c."expiresAt" > NOW()
+              ${filterCondition}
+            `,
+            userId,
+            eventId,
+            hasCoordinates,
+            latitude ?? null,
+            longitude ?? null,
+            maxDistanceMeters,
+          )
+        : await this.prisma.$queryRawUnsafe<Array<{ total: bigint }>>(
+            `
+            SELECT COUNT(*)::bigint AS total
+            FROM "Carpool" c
+            LEFT JOIN "UserFollow" uf
+              ON uf."followerId" = $1
+             AND uf."followingId" = c."driverId"
+            WHERE c."eventId" = $2
+              AND c.status = 'ACTIVE'
+              AND c."isDeleted" = false
+              AND c."expiresAt" > NOW()
+              ${filterCondition}
+            `,
+            userId,
+            eventId,
+          );
+
+    const rows = await this.prisma.$queryRawUnsafe<RankedCarpoolRow[]>(
+      `
+      SELECT
+        c.id,
+        c."driverId",
+        c."eventId",
+        c.origin,
+        c.destination,
+        c."departureTime",
+        c."availableSeats",
+        c."pricePerSeat",
+        c.description,
+        c.note,
+        c.status,
+        c."expiresAt",
+        c."createdAt",
+        u.username AS "driverUsername",
+        u."profilePicUrlTN" AS "driverProfilePicUrlTN",
+        u."isVerified" AS "driverIsVerified",
+        e.title AS "eventTitle",
+        e."imageUrl" AS "eventImageUrl",
+        (
+          SELECT COUNT(*)::int
+          FROM "CarpoolPassenger" cp
+          WHERE cp."carpoolId" = c.id
+            AND cp.status = 'ACCEPTED'
+        ) AS "acceptedPassengers",
+        (uf.id IS NOT NULL) AS "isFollowedOwner",
+        CASE
+          WHEN $3::boolean = true AND c."startPoint" IS NOT NULL
+            THEN ST_DistanceSphere(
+              c."startPoint",
+              ST_SetSRID(ST_MakePoint($5, $4), 4326)
+            ) / 1000.0
+          ELSE NULL
+        END AS "distanceKm"
+      FROM "Carpool" c
+      INNER JOIN "User" u
+        ON u.id = c."driverId"
+      LEFT JOIN "Event" e
+        ON e.id = c."eventId"
+      LEFT JOIN "UserFollow" uf
+        ON uf."followerId" = $1
+       AND uf."followingId" = c."driverId"
+      WHERE c."eventId" = $2
+        AND c.status = 'ACTIVE'
+        AND c."isDeleted" = false
+        AND c."expiresAt" > NOW()
+        ${filterCondition}
+      ORDER BY
+        CASE
+          WHEN $3::boolean = true
+            AND c."startPoint" IS NOT NULL
+            AND ST_DistanceSphere(
+              c."startPoint",
+              ST_SetSRID(ST_MakePoint($5, $4), 4326)
+            ) <= $6 THEN 0
+          WHEN uf.id IS NOT NULL THEN 1
+          ELSE 2
+        END ASC,
+        CASE
+          WHEN $3::boolean = true AND c."startPoint" IS NOT NULL
+            THEN ST_DistanceSphere(
+              c."startPoint",
+              ST_SetSRID(ST_MakePoint($5, $4), 4326)
+            )
+          ELSE NULL
+        END ASC NULLS LAST,
+        c."createdAt" DESC
+      LIMIT $7 OFFSET $8
+      `,
+      userId,
+      eventId,
+      hasCoordinates,
+      latitude ?? null,
+      longitude ?? null,
+      maxDistanceMeters,
+      pageSize,
+      skip,
+    );
+
+    const data = rows.map((row) => {
+      const isCloseToYou =
+        hasCoordinates &&
+        row.distanceKm !== null &&
+        row.distanceKm <= maxDistanceKm;
+      const priority = isCloseToYou ? 1 : row.isFollowedOwner ? 2 : 3;
+      const primaryReason =
+        priority === 1
+          ? 'distance'
+          : priority === 2
+            ? 'followed_owner'
+            : 'others';
+      const reasons = [
+        ...(isCloseToYou ? ['close_to_you'] : []),
+        ...(row.isFollowedOwner ? ['followed_owner'] : []),
+      ];
+
+      return {
+        id: row.id,
+        origin: row.origin,
+        destination: row.destination,
+        departureTime: row.departureTime,
+        availableSeats: row.availableSeats,
+        seatsLeft: Math.max(0, row.availableSeats - row.acceptedPassengers),
+        pricePerSeat: row.pricePerSeat,
+        description: row.description,
+        note: row.note,
+        status: row.status,
+        expiresAt: row.expiresAt,
+        distanceKm: row.distanceKm,
+        isCloseToYou,
+        isFollowedOwner: row.isFollowedOwner,
+        ranking: {
+          priority,
+          primaryReason,
+          reasons,
+        },
+        driver: {
+          id: row.driverId,
+          username: row.driverUsername,
+          profilePicUrlTN: row.driverProfilePicUrlTN,
+          isVerified: row.driverIsVerified,
+        },
+        event: {
+          id: row.eventId,
+          title: row.eventTitle,
+          imageUrl: row.eventImageUrl,
+        },
+      };
+    });
+
+    return {
+      message:
+        selectedFilter === EventCarpoolFilter.ALL
+          ? 'Paginated event carpools retrieved successfully'
+          : `Paginated event carpools (${selectedFilter}) retrieved successfully`,
+      data,
+      page,
+      pageSize,
+      total: Number(totalResult[0]?.total ?? 0),
     };
   }
 

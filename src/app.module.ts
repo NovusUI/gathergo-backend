@@ -23,7 +23,7 @@ import { CommunityFollowModule } from './modules/community-follow/community-foll
 import { TransactionReferenceModule } from './modules/transaction-reference/transaction-reference.module';
 import { EventTicketModule } from './modules/event-ticket/event-ticket.module';
 import { ScheduleModule } from '@nestjs/schedule';
-import { MailModule } from './modules/mail/mail.module';
+//import { MailModule } from './modules/mail/mail.module';
 import { CronModule } from './cron-jobs/cron-module';
 import { DeviceTokenModule } from './modules/device-token/device-token.module';
 import { CarpoolQueueModule } from './queue/carpool/queue.module';
@@ -31,6 +31,9 @@ import { MessageModule } from './modules/message/message.module';
 import { RedisModule } from './redis/redis.module';
 import { GuardsModule } from './common/guards/guards.module';
 import { BackgroundNotificationsModule } from './modules/background-notification/backgroundnotification.module';
+import { RegistrationModule } from './modules/registration/registration.module';
+import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { ScannerModule } from './modules/scanner/scanner.modules';
 
 @Module({
   imports: [
@@ -42,6 +45,7 @@ import { BackgroundNotificationsModule } from './modules/background-notification
     TicketModule,
     CarpoolModule,
     FeedModule,
+    DashboardModule,
     PostModule,
     CommunityModule,
     TransactionModule,
@@ -52,7 +56,7 @@ import { BackgroundNotificationsModule } from './modules/background-notification
     CommunityFollowModule,
     TransactionReferenceModule,
     EventTicketModule,
-    MailModule,
+    //MailModule,
     CarpoolModule,
     CronModule,
     DeviceTokenModule,
@@ -61,6 +65,8 @@ import { BackgroundNotificationsModule } from './modules/background-notification
     RedisModule,
     GuardsModule,
     BackgroundNotificationsModule,
+    RegistrationModule,
+    ScannerModule,
     ConfigModule.forRoot({
       isGlobal: true, // <--- makes ConfigService available app-wide
       validationSchema: Joi.object({

@@ -89,3 +89,20 @@ export function getRandomNote(): string {
 
   return pool[index];
 }
+
+export function formatPayment(payment: any) {
+  return {
+    id: payment.id,
+    name: payment.user.name || 'Anonymous',
+    amount: payment.amount / 100,
+    time: payment.createdAt.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+    date: payment.createdAt.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+    }),
+    event: payment.event?.title || 'General Payment',
+  };
+}

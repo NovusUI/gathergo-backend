@@ -2,27 +2,31 @@ import {
   Injectable,
   BadRequestException,
   NotFoundException,
+  UnauthorizedException,
+  InternalServerErrorException,
 } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateTransactionReferenceDto } from './dto/create-transaction-reference.dto';
 import { PaystackService } from '../paystack/paystack.service';
 import { PaystackResponse } from '../paystack/types/paystack-response.type';
 import { nanoid } from 'nanoid';
-import { MailService } from '../mail/mail.service';
+//import { MailService } from '../mail/mail.service';
 import { DonationService } from '../donation/donation.service';
 import { InitiateDonationDto } from './dto/initiate-donation.dto';
 import { TicketService } from '../ticket/ticket.service';
 import { NotificationService } from '../notification/notification.service';
-import { notificationConstants } from 'src/common/constants';
+import { RegistrationService } from '../registration/registration.service';
+import * as crypto from 'crypto';
 
 @Injectable()
 export class TransactionReferenceService {
   constructor(
     private prisma: PrismaService,
     private paystackService: PaystackService,
-    private mailService: MailService,
+    //private mailService: MailService,
     private donationService: DonationService,
     private ticketService: TicketService,
+    private registrationService: RegistrationService,
     private notificationService: NotificationService,
   ) {}
 
@@ -40,11 +44,14 @@ export class TransactionReferenceService {
       ticketName: string;
     }[] = [];
     let expectedAmount = 0;
+    let eventId: null | string = null;
 
     for (const item of dto.items) {
       const eventTicket = await this.prisma.eventTicket.findUnique({
         where: { id: item.id },
       });
+
+      if (!eventId) eventId = eventTicket?.eventId || null;
 
       if (!eventTicket) {
         unavailableTickets.push({
@@ -101,6 +108,7 @@ export class TransactionReferenceService {
       data: {
         userId,
         amount: totalAmount,
+        eventId: eventId,
         status:
           totalAmount > 0
             ? 'PENDING'
@@ -110,6 +118,7 @@ export class TransactionReferenceService {
         metadata: {
           paidTickets,
           unavailableTickets,
+          ...(eventId && { eventId }),
         },
       },
     });
@@ -175,6 +184,7 @@ export class TransactionReferenceService {
       data: {
         userId,
         amount: price,
+        eventId: eventId,
         status: price > 0 ? 'PENDING' : 'SUCCESS',
         metadata: {
           type: 'REGISTRATION',
@@ -240,7 +250,7 @@ export class TransactionReferenceService {
     }
 
     // Verify minimum amount
-    if (amount < 1000) {
+    if (amount < 500) {
       throw new BadRequestException(
         'Minimum donation amount is ₦1000 (100000 kobo)',
       );
@@ -250,8 +260,9 @@ export class TransactionReferenceService {
     const transactionRef = await this.prisma.transactionReference.create({
       data: {
         userId,
-        amount,
+        amount: amount,
         status: 'PENDING',
+        eventId: eventId,
         metadata: {
           type: 'DONATION',
           eventId,
@@ -265,7 +276,7 @@ export class TransactionReferenceService {
     const paymentInitResponse =
       await this.paystackService.initializeTransaction({
         email,
-        amount: amount,
+        amount: amount * 100,
         reference: transactionRef.id,
         callback_url: `https://yourcallback.com/donation-success`, // Update with your actual callback URL
         metadata: {
@@ -278,8 +289,8 @@ export class TransactionReferenceService {
       status: paymentInitResponse?.status,
       transactionId: transactionRef.id,
       paymentUrl: paymentInitResponse?.data?.authorization_url,
-      totalAmount: amount,
-      amountInNaira: amount / 100,
+      totalAmount: amount * 100,
+      amountInNaira: amount,
       event: {
         id: event.id,
         title: event.title,
@@ -287,11 +298,51 @@ export class TransactionReferenceService {
     };
   }
 
-  async verifyPayment(reference: string) {
+  // async verifyPayment(payload: any, signature: string) {
+  //   console.log(payload);
+
+  //   const secret = process.env.PAYSTACK_SECRET_KEY;
+
+  //   if (!secret) {
+  //     throw new InternalServerErrorException(
+  //       'Paystack secret key not configured',
+  //     );
+  //   }
+
+  //   const hash = crypto
+  //     .createHmac('sha512', secret)
+  //     .update(JSON.stringify(payload))
+  //     .digest('hex');
+
+  //   if (hash !== signature) {
+  //     throw new UnauthorizedException('Invalid Paystack signature');
+  //   }
+  // }
+  async verifyPayment(payload: any, signature: string) {
+    console.log(payload.data.reference);
+    const secret = process.env.PAYSTACK_SECRET_KEY;
+
+    if (!secret) {
+      throw new InternalServerErrorException(
+        'Paystack secret key not configured',
+      );
+    }
+
+    const hash = crypto
+      .createHmac('sha512', secret)
+      .update(JSON.stringify(payload))
+      .digest('hex');
+
+    if (hash !== signature) {
+      throw new UnauthorizedException('Invalid Paystack signature');
+    }
+
+    const { data } = payload;
+
     const transaction = await this.prisma.transactionReference.findUnique({
-      where: { id: reference },
+      where: { id: data.reference },
       include: {
-        user: true, // 🟢 Include user details
+        user: true,
       },
     });
 
@@ -299,20 +350,24 @@ export class TransactionReferenceService {
       throw new BadRequestException('Invalid or already processed transaction');
     }
 
-    // Verify payment from Paystack
-    const paystackResponse =
-      await this.paystackService.verifyTransaction(reference);
-
-    if (
-      !paystackResponse.status ||
-      paystackResponse.data.status !== 'success'
-    ) {
-      await this.prisma.transactionReference.update({
-        where: { id: reference },
-        data: { status: 'FAILED' },
-      });
-      throw new BadRequestException('Payment verification failed');
+    if (payload.data.amount !== transaction.amount * 100) {
+      throw new BadRequestException('Amount mismatch');
     }
+
+    // Verify payment from Paystack
+    // const paystackResponse =
+    //   await this.paystackService.verifyTransaction(reference);
+
+    // if (
+    //   !paystackResponse.status ||
+    //   paystackResponse.data.status !== 'success'
+    // ) {
+    //   await this.prisma.transactionReference.update({
+    //     where: { id: reference },
+    //     data: { status: 'FAILED' },
+    //   });
+    //   throw new BadRequestException('Payment verification failed');
+    // }
 
     // ✅ Guard: Check metadata type
     if (
@@ -334,48 +389,18 @@ export class TransactionReferenceService {
     console.log(metadata.type);
 
     if (metadata.type === 'REGISTRATION') {
-      await this.prisma.registration.create({
-        data: {
-          eventId: metadata.eventId,
-          userId: transaction.userId,
-          qrCode: nanoid(16),
-          transactionId: transaction.id,
-        },
-      });
-
-      this.prisma.event
-        .findUnique({
-          where: {
-            id: metadata.eventId,
-          },
-        })
-        .then((res) => {
-          if (res) {
-            res.creatorId;
-            this.notificationService
-              .createNotification({
-                recipientIds: [res.creatorId],
-                title: notificationConstants.EVENT_REGISTRATION_TITLE,
-                message: notificationConstants.EVENT_REGISTRATION_MESSAGE(
-                  transaction.user.username,
-                ),
-                type: notificationConstants.EVENT_REGISTRATION,
-                imageUrl: res.thumbnailUrl || '',
-                data: {
-                  eventid: res.id,
-                },
-                link: '/event/' + res.id,
-              })
-              .then(() => {});
-          }
-        });
+      await this.registrationService.createRegistration(
+        metadata.eventId,
+        transaction.userId,
+        transaction.id,
+      );
     } else if (metadata.type === 'DONATION') {
       // ✅ Create donation using DonationService
       try {
         const donation = await this.donationService.createDonation(
           {
             eventId: metadata.eventId,
-            amount: transaction.amount, // Already in kobo
+            amount: transaction.amount,
             message: metadata.message,
             isAnonymous: metadata.isAnonymous,
             transactionId: transaction.id,
@@ -392,7 +417,7 @@ export class TransactionReferenceService {
         };
 
         await this.prisma.transactionReference.update({
-          where: { id: reference },
+          where: { id: data.reference },
           data: {
             status: 'SUCCESS',
             metadata: updatedMetadata,
@@ -416,7 +441,7 @@ export class TransactionReferenceService {
       } catch (error) {
         // If donation creation fails, mark transaction as failed
         await this.prisma.transactionReference.update({
-          where: { id: reference },
+          where: { id: data.reference },
           data: { status: 'FAILED' },
         });
         throw new BadRequestException(
@@ -440,22 +465,24 @@ export class TransactionReferenceService {
     // ✅ Update metadata safely
     const updatedMetadata = {
       ...metadata,
-      ...(metadata.type === 'REGISTRATION' ? {} : { unavailableTickets }),
+      ...(['REGISTRATION', 'DONATION'].includes(metadata.type)
+        ? {}
+        : { unavailableTickets }),
     };
 
     await this.prisma.transactionReference.update({
-      where: { id: reference },
+      where: { id: data.reference },
       data: {
         status: 'SUCCESS',
         metadata: updatedMetadata,
       },
     });
 
-    await this.mailService.sendTicketConfirmationEmail({
-      email: transaction.user.email,
-      name: transaction.user.username || 'customer',
-      eventTitle: 'eventnme', // or get from event info
-    });
+    // await this.mailService.sendTicketConfirmationEmail({
+    //   email: transaction.user.email,
+    //   name: transaction.user.username || 'customer',
+    //   eventTitle: 'eventnme', // or get from event info
+    // });
     return {
       message: 'Payment verified and tickets issued',
       unavailableTickets,

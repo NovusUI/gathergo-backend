@@ -6,10 +6,12 @@ import { JwtModule } from '@nestjs/jwt';
 import { JwtStrategy } from './jwt.strategy';
 import { GoogleStrategy } from './google.strategy';
 import { PassportModule } from '@nestjs/passport';
+import { FirebaseModule } from '../firebase/firebase.module';
 
 @Module({
   imports: [
     PrismaModule,
+    FirebaseModule,
     PassportModule,
     JwtModule.register({
       secret: process.env.JWT_SECRET,

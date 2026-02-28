@@ -3,8 +3,8 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider          = "postgresql"
+  url               = env("DATABASE_URL")
   shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
 }
 
@@ -43,7 +43,7 @@ model User {
   Post                  Post[]
   Registration          Registration[]
   Ticket                Ticket[]
-  Donation              Donation[] 
+  Donation              Donation[]
   TransactionReference  TransactionReference[]
   following             UserFollow[]           @relation("Follower")
   followedBy            UserFollow[]           @relation("Following")
@@ -51,7 +51,12 @@ model User {
   commentsMentioned     Comment[]              @relation("CommentMentions")
   readMessages          Message[]              @relation("MessageReadBy")
   postsMentions         Post[]                 @relation("PostMentions")
-  refreshTokens RefreshToken[]
+  refreshTokens         RefreshToken[]
+  feeds                 Feed[]
+  hiddenFeeds           HiddenFeed[]
+  scannerPermissions    ScannerPermission[]    @relation("ScannerPermissions")
+  grantedPermissions    ScannerPermission[]    @relation("PermissionOwner")
+  scanLogs              ScanLog[]
 }
 
 model UserPreference {
@@ -126,11 +131,16 @@ model Event {
   community             Community?       @relation("CommunityEvents", fields: [communityId], references: [id])
   creator               User             @relation("UserEvents", fields: [creatorId], references: [id])
   eventTickets          EventTicket[]
-  donations             Donation[] 
+  donations             Donation[]
   EventTrend            EventTrend?
   Post                  Post[]
   Registration          Registration[]
-  isImageProcessing     Boolean       @default(false)
+  isImageProcessing     Boolean          @default(false)
+  feeds                 Feed[]
+
+  transactions       TransactionReference[]
+
+  scanLogs           ScanLog[]
 }
 
 model EventTicket {
@@ -161,30 +171,38 @@ model Ticket {
   transactionId String
   eventTicket   EventTicket @relation(fields: [eventTicketId], references: [id])
   user          User        @relation(fields: [userId], references: [id])
+  scannedAt     DateTime?
+  scannedBy     String?
+  scanLocation  String?
+  ScanLog       ScanLog[]
 }
 
 model Registration {
-  id            String   @id @default(uuid())
+  id            String    @id @default(uuid())
   userId        String
-  status        String   @default("active")
-  createdAt     DateTime @default(now())
-  qrCode        String   @unique
-  isUsed        Boolean  @default(false)
+  status        String    @default("active")
+  createdAt     DateTime  @default(now())
+  qrCode        String    @unique
+  isUsed        Boolean   @default(false)
   transactionId String
   eventId       String
-  event         Event    @relation(fields: [eventId], references: [id])
-  user          User     @relation(fields: [userId], references: [id])
+  event         Event     @relation(fields: [eventId], references: [id])
+  user          User      @relation(fields: [userId], references: [id])
+  scannedAt     DateTime?
+  scannedBy     String?
+  scanLocation  String?
+  ScanLog       ScanLog[]
 }
 
 model Donation {
   id            String   @id @default(uuid())
   userId        String
-  amount        Int      // Amount donated in kobo (₦50,000 = 5000000)
+  amount        Int // Amount donated in kobo (₦50,000 = 5000000)
   status        String   @default("active")
   createdAt     DateTime @default(now())
   transactionId String
   eventId       String
-  message       String?  // Optional message from donor
+  message       String? // Optional message from donor
   isAnonymous   Boolean  @default(false) // Whether donor wants to be anonymous
   event         Event    @relation(fields: [eventId], references: [id])
   user          User     @relation(fields: [userId], references: [id])
@@ -195,6 +213,7 @@ model Donation {
   @@index([status])
   @@index([transactionId])
 }
+
 model TransactionReference {
   id        String                @id @default(uuid())
   userId    String
@@ -204,45 +223,47 @@ model TransactionReference {
   metadata  Json
   status    TransactionStatusType @default(PENDING)
   user      User                  @relation(fields: [userId], references: [id])
+  eventId   String?
+  event     Event?                @relation(fields: [eventId], references: [id])
 }
 
 model Carpool {
-  id             String             @id @default(uuid())
+  id             String                                @id @default(uuid())
   driverId       String
   eventId        String?
   origin         String
   destination    String?
   departureTime  String
-  availableSeats Int                @default(3)
-  pricePerSeat   Float              @default(0)
+  availableSeats Int                                   @default(3)
+  pricePerSeat   Float                                 @default(0)
   description    String?
-  status         String             @default("ACTIVE")
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
-  isDeleted      Boolean            @default(false)
-  startPoint  Unsupported("geometry(Point, 4326)")?
-  endPoint    Unsupported("geometry(Point, 4326)")?
-  expiresAt      DateTime           @default(now())
+  status         String                                @default("ACTIVE")
+  createdAt      DateTime                              @default(now())
+  updatedAt      DateTime                              @updatedAt
+  isDeleted      Boolean                               @default(false)
+  startPoint     Unsupported("geometry(Point, 4326)")?
+  endPoint       Unsupported("geometry(Point, 4326)")?
+  expiresAt      DateTime                              @default(now())
   note           String?
-  driver         User               @relation(fields: [driverId], references: [id])
-  event          Event?             @relation(fields: [eventId], references: [id])
+  driver         User                                  @relation(fields: [driverId], references: [id])
+  event          Event?                                @relation(fields: [eventId], references: [id])
   passengers     CarpoolPassenger[]
   Message        Message[]
 }
 
 model CarpoolPassenger {
-  id          String    @id @default(uuid())
-  userId      String
-  carpoolId   String
-  status      String    @default("PENDING")
-  origin      String
-  startPoint  Unsupported("geometry(Point, 4326)")?
-  note        String?
-  joinedAt    DateTime?
-  requestedAt DateTime  @default(now())
-  updatedAt   DateTime?
-  carpool     Carpool   @relation(fields: [carpoolId], references: [id])
-  user        User      @relation(fields: [userId], references: [id])
+  id                String                                @id @default(uuid())
+  userId            String
+  carpoolId         String
+  status            String                                @default("PENDING")
+  origin            String
+  startPoint        Unsupported("geometry(Point, 4326)")?
+  note              String?
+  joinedAt          DateTime?
+  requestedAt       DateTime                              @default(now())
+  updatedAt         DateTime?
+  carpool           Carpool                               @relation(fields: [carpoolId], references: [id])
+  user              User                                  @relation(fields: [userId], references: [id])
   estimatedDistance String?
 }
 
@@ -386,4 +407,94 @@ model RefreshToken {
   isRevoked Boolean  @default(false)
   expiresAt DateTime
   createdAt DateTime @default(now())
+}
+
+model Feed {
+  id       String       @id @default(cuid())
+  eventId  String
+  type     String // FeedType enum
+  title    String
+  content  String?
+  userId   String?
+  metadata Json         @default("{}")
+  actions  Json         @default("[]")
+  isPinned Boolean      @default(false)
+  pinOrder Int          @default(4) // 0 = highest priority
+  isHidden HiddenFeed[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user  User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Indexes
+  @@index([eventId, createdAt])
+  @@index([eventId, isPinned, pinOrder])
+  @@index([eventId, type, isPinned])
+  @@index([userId, isPinned])
+  @@index([createdAt])
+}
+
+model HiddenFeed {
+  userId   String
+  feedId   String
+  hiddenAt DateTime @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  feed Feed @relation(fields: [feedId], references: [id], onDelete: Cascade)
+
+  // Composite primary key
+  @@id([userId, feedId])
+  // Indexes
+  @@index([userId])
+  @@index([feedId])
+}
+
+// Add to your existing schema
+
+
+model ScannerPermission {
+  id        String    @id @default(uuid())
+  ownerId   String    // Event owner who granted permission
+  scannerId String    // User who can scan
+  createdAt DateTime  @default(now())
+  expiresAt DateTime? // Optional expiration
+  isActive  Boolean   @default(true)
+  isDeleted  Boolean   @default(false)
+  // Relations
+  owner   User   @relation("PermissionOwner", fields: [ownerId], references: [id])
+  scanner User   @relation("ScannerPermissions", fields: [scannerId], references: [id])
+  
+
+  // Unique constraint: an owner can grant permission to a scanner only once
+  @@unique([ownerId, scannerId])
+}
+
+
+model ScanLog {
+  id             String   @id @default(uuid())
+  type           String // 'ticket' | 'registration' | 'validation'
+  qrCode         String
+  scannedById    String // User who performed the scan
+  eventId        String?
+  ticketId       String?
+  registrationId String?
+  action         String // 'validated' | 'marked_used' | 'checked_in'
+  success        Boolean
+  message        String
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  // Relations - no need for duplicate user reference
+  event        Event?        @relation(fields: [eventId], references: [id])
+  ticket       Ticket?       @relation(fields: [ticketId], references: [id])
+  registration Registration? @relation(fields: [registrationId], references: [id])
+  scannedBy    User          @relation(fields: [scannedById], references: [id])
+
+  @@index([qrCode])
+  @@index([scannedById])
+  @@index([createdAt])
 }

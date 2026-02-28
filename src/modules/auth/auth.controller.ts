@@ -25,6 +25,7 @@ import {
 } from '@nestjs/swagger';
 import { ForgotPasswordDto } from './dtos/forgot-password.dto';
 import { ResetPasswordDto } from './dtos/reset-password.dto';
+import { PhoneFirebaseTokenDto } from './dtos/phone-firebase-token.dto';
 import { AuthGuard } from '@nestjs/passport';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { Response } from 'express';
@@ -134,6 +135,18 @@ export class AuthController {
   })
   async refresh(@Body() body: RefreshDto) {
     return this.authService.refresh(body.refreshToken);
+  }
+
+  @Post('phone/firebase-token')
+  @ApiOperation({
+    summary: 'Login/Signup with a Firebase-verified phone identity',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Phone authentication successful.',
+  })
+  async phoneFirebaseToken(@Body() dto: PhoneFirebaseTokenDto) {
+    return this.authService.loginWithFirebasePhone(dto);
   }
 
   @Post('verify-username')
