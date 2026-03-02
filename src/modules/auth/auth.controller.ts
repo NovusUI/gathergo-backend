@@ -30,6 +30,8 @@ import { AuthGuard } from '@nestjs/passport';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { Response } from 'express';
 import * as passport from 'passport';
+import { RateLimit } from 'src/common/decorators/rate-limit.decorator';
+import { RateLimitGuard } from 'src/common/guards/rate-limit.guard';
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -43,6 +45,8 @@ export class AuthController {
   }
 
   @Post('login')
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ windowSec: 600, max: 10, identityField: 'email', cooldownSec: 900 })
   @ApiOperation({ summary: 'Login with email and password' })
   login(@Body() dto: LoginDto) {
     return this.authService.loginWithPassword(dto);
@@ -128,6 +132,8 @@ export class AuthController {
   }
 
   @Post('refresh')
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ windowSec: 600, max: 20, cooldownSec: 300 })
   @ApiBody({ type: RefreshDto })
   @ApiResponse({
     status: 200,
@@ -138,6 +144,13 @@ export class AuthController {
   }
 
   @Post('phone/firebase-token')
+  @UseGuards(RateLimitGuard)
+  @RateLimit({
+    windowSec: 600,
+    max: 8,
+    identityField: 'phoneNumber',
+    cooldownSec: 900,
+  })
   @ApiOperation({
     summary: 'Login/Signup with a Firebase-verified phone identity',
   })

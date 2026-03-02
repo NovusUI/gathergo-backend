@@ -6,6 +6,7 @@ import {
   Param,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { TransactionReferenceService } from './transaction-reference.service';
@@ -21,6 +22,8 @@ import {
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { InitiateDonationDto } from './dto/initiate-donation.dto';
 import { Public } from 'src/common/decorators/public.decorator';
+import { RateLimit } from 'src/common/decorators/rate-limit.decorator';
+import { RateLimitGuard } from 'src/common/guards/rate-limit.guard';
 
 @Controller('transaction-reference')
 @ApiTags('Transaction References')
@@ -71,12 +74,19 @@ export class TransactionReferenceController {
 
   @Post('verify')
   @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ windowSec: 60, max: 120, cooldownSec: 60 })
   @ApiOperation({ summary: 'Verify transaction after Paystack callback' })
   async verifyTransaction(
     @Headers('x-paystack-signature') signature: string,
+    @Req() req: any,
     @Body() body: any,
   ) {
-    return this.transactionReferenceService.verifyPayment(body, signature);
+    return this.transactionReferenceService.verifyPayment(
+      body,
+      signature,
+      req?.rawBody,
+    );
   }
 
   @Get('status/:id')

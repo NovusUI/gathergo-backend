@@ -62,7 +62,8 @@ export class TransactionReferenceService {
         continue;
       }
 
-      const availableQty = Math.min(item.quantity, eventTicket.quantity);
+      const availableStock = Math.max(eventTicket.quantity - eventTicket.sold, 0);
+      const availableQty = Math.min(item.quantity, availableStock);
 
       expectedAmount +=
         item.quantity * (eventTicket.updatedPrice || eventTicket.price);
@@ -125,19 +126,20 @@ export class TransactionReferenceService {
 
     // ✅ Create free tickets immediately
     for (const freeTicket of freeTickets) {
-      await this.prisma.ticket.createMany({
-        data: Array.from({ length: freeTicket.quantity }).map(() => ({
-          eventTicketId: freeTicket.eventTicketId,
-          userId,
-          qrCode: nanoid(16),
-          transactionId: transactionRef.id,
-        })),
-      });
+      await this.prisma.$transaction(async (tx) => {
+        await tx.ticket.createMany({
+          data: Array.from({ length: freeTicket.quantity }).map(() => ({
+            eventTicketId: freeTicket.eventTicketId,
+            userId,
+            qrCode: nanoid(16),
+            transactionId: transactionRef.id,
+          })),
+        });
 
-      // Update stock
-      await this.prisma.eventTicket.update({
-        where: { id: freeTicket.eventTicketId },
-        data: { sold: { increment: freeTicket.quantity } },
+        await tx.eventTicket.update({
+          where: { id: freeTicket.eventTicketId },
+          data: { sold: { increment: freeTicket.quantity } },
+        });
       });
     }
 
@@ -318,7 +320,7 @@ export class TransactionReferenceService {
   //     throw new UnauthorizedException('Invalid Paystack signature');
   //   }
   // }
-  async verifyPayment(payload: any, signature: string) {
+  async verifyPayment(payload: any, signature: string, rawBody?: Buffer) {
     console.log(payload.data.reference);
     const secret = process.env.PAYSTACK_SECRET_KEY;
 
@@ -328,12 +330,20 @@ export class TransactionReferenceService {
       );
     }
 
-    const hash = crypto
+    const computedSignature = crypto
       .createHmac('sha512', secret)
-      .update(JSON.stringify(payload))
+      .update(rawBody ?? JSON.stringify(payload))
       .digest('hex');
 
-    if (hash !== signature) {
+    const safeCompare =
+      signature &&
+      computedSignature.length === signature.length &&
+      crypto.timingSafeEqual(
+        Buffer.from(computedSignature, 'utf8'),
+        Buffer.from(signature, 'utf8'),
+      );
+
+    if (!safeCompare) {
       throw new UnauthorizedException('Invalid Paystack signature');
     }
 
@@ -354,20 +364,17 @@ export class TransactionReferenceService {
       throw new BadRequestException('Amount mismatch');
     }
 
-    // Verify payment from Paystack
-    // const paystackResponse =
-    //   await this.paystackService.verifyTransaction(reference);
+    const paystackResponse = await this.paystackService.verifyTransaction(
+      data.reference,
+    );
 
-    // if (
-    //   !paystackResponse.status ||
-    //   paystackResponse.data.status !== 'success'
-    // ) {
-    //   await this.prisma.transactionReference.update({
-    //     where: { id: reference },
-    //     data: { status: 'FAILED' },
-    //   });
-    //   throw new BadRequestException('Payment verification failed');
-    // }
+    if (!paystackResponse?.status || paystackResponse.data?.status !== 'success') {
+      await this.prisma.transactionReference.update({
+        where: { id: data.reference },
+        data: { status: 'FAILED' },
+      });
+      throw new BadRequestException('Payment verification failed');
+    }
 
     // ✅ Guard: Check metadata type
     if (
@@ -511,7 +518,7 @@ export class TransactionReferenceService {
     transactionId: string,
     type: string,
   ) {
-    if (type === 'TICKETS') {
+    if (type === 'TICKETS' || type === 'TICKET') {
       const tickets = await this.prisma.ticket.findMany({
         where: { transactionId },
         include: {
