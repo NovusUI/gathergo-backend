@@ -5,10 +5,8 @@ import {
   Get,
   UseGuards,
   Req,
-  Param,
   Res,
   Query,
-  Session,
 } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { SignupDto } from './dtos/signup.dto';
@@ -26,6 +24,8 @@ import {
 import { ForgotPasswordDto } from './dtos/forgot-password.dto';
 import { ResetPasswordDto } from './dtos/reset-password.dto';
 import { PhoneFirebaseTokenDto } from './dtos/phone-firebase-token.dto';
+import { VerifyEmailCodeDto } from './dtos/verify-email-code.dto';
+import { ResendEmailVerificationCodeDto } from './dtos/resend-email-verification-code.dto';
 import { AuthGuard } from '@nestjs/passport';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { Response } from 'express';
@@ -42,6 +42,22 @@ export class AuthController {
   @ApiOperation({ summary: 'Register with email and password' })
   signup(@Body() dto: SignupDto) {
     return this.authService.signup(dto);
+  }
+
+  @Post('verify-email')
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ windowSec: 600, max: 10, identityField: 'email', cooldownSec: 600 })
+  @ApiOperation({ summary: 'Verify an email/password account with a code' })
+  verifyEmail(@Body() dto: VerifyEmailCodeDto) {
+    return this.authService.verifyEmailCode(dto);
+  }
+
+  @Post('resend-email-verification')
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ windowSec: 600, max: 5, identityField: 'email', cooldownSec: 600 })
+  @ApiOperation({ summary: 'Resend the email verification code' })
+  resendEmailVerification(@Body() dto: ResendEmailVerificationCodeDto) {
+    return this.authService.resendEmailVerificationCode(dto);
   }
 
   @Post('login')
@@ -102,6 +118,8 @@ export class AuthController {
       email: googleUser.email,
       hasPrefrences: googleUser.hasPreferences,
       isProfileComplete: googleUser.isProfileComplete,
+      isNewUser: googleUser.isNewUser,
+      fullName: googleUser.fullName,
     });
 
     // Get redirect URL from user object (passed from strategy)
@@ -170,6 +188,8 @@ export class AuthController {
   }
 
   @Post('forgot-password')
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ windowSec: 600, max: 5, identityField: 'email', cooldownSec: 600 })
   @ApiOperation({ summary: 'Request password reset link' })
   @ApiResponse({ status: 200, description: 'Email sent if user exists' })
   forgotPassword(@Body() dto: ForgotPasswordDto) {
@@ -177,7 +197,9 @@ export class AuthController {
   }
 
   @Post('reset-password')
-  @ApiOperation({ summary: 'Reset password with token' })
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ windowSec: 600, max: 10, identityField: 'email', cooldownSec: 600 })
+  @ApiOperation({ summary: 'Reset password with a verification code' })
   @ApiResponse({ status: 200, description: 'Password reset successful' })
   resetPassword(@Body() dto: ResetPasswordDto) {
     return this.authService.resetPassword(dto);

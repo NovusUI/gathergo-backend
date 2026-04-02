@@ -13,6 +13,7 @@ import {
   PubSubNotification,
 } from './pubsub.types';
 import { PrismaService } from '../prisma/prisma.service';
+import { getRedisOptions } from 'src/config/runtime-env';
 
 @Injectable()
 export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
@@ -23,14 +24,14 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisPubSubService.name);
 
   constructor(private readonly prisma: PrismaService) {
-    this.publisher = new Redis({
+    this.publisher = new Redis(getRedisOptions({
       enableOfflineQueue: false, // Disable queueing when Redis is down
       maxRetriesPerRequest: 1, // Fail fast if Redis is unavailable
-    });
-    this.subscriber = new Redis({
+    }));
+    this.subscriber = new Redis(getRedisOptions({
       enableOfflineQueue: false,
       maxRetriesPerRequest: 1,
-    });
+    }));
   }
 
   setSocketServer(io: Server) {

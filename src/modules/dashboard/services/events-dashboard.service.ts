@@ -57,7 +57,7 @@ export class EventsDashboardService {
       },
       include: {
         event: {
-          select: { title: true },
+          select: { title: true, },
         },
         user: {
           select: { username: true },

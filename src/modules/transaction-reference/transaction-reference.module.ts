@@ -10,6 +10,7 @@ import { NotificationModule } from '../notification/notification.module';
 import { RegistrationService } from '../registration/registration.service';
 import { FeedIntegrationService } from '../feed/feed-integration.service';
 import { FeedService } from '../feed/feed.service';
+import { AlatCollectionService } from './alat-collection.service';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { FeedService } from '../feed/feed.service';
   providers: [
     TransactionReferenceService,
     PaystackService,
+    AlatCollectionService,
     RegistrationService,
     FeedIntegrationService,
     FeedService,

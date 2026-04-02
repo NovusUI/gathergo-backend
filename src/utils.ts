@@ -91,10 +91,13 @@ export function getRandomNote(): string {
 }
 
 export function formatPayment(payment: any) {
+
+  console.log(payment,"check is anon")
   return {
     id: payment.id,
-    name: payment.user.name || 'Anonymous',
+    name: payment.metadata.isAnonymous ? 'Anonymous' : payment.user.username || 'Anonymous',
     amount: payment.amount / 100,
+    creatorPayable: payment.creatorPayable/100,
     time: payment.createdAt.toLocaleTimeString('en-US', {
       hour: '2-digit',
       minute: '2-digit',
@@ -106,3 +109,4 @@ export function formatPayment(payment: any) {
     event: payment.event?.title || 'General Payment',
   };
 }
+

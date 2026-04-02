@@ -47,10 +47,10 @@
     "google-auth-library": "^10.3.0",
     "ioredis": "^5.6.1",
     "joi": "^17.13.3",
-    "nanoid": "^5.1.5",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "passport-jwt": "^4.0.1",
+    "qrcode": "^1.5.4",
     "reflect-metadata": "^0.2.2",
     "resend": "^6.9.2",
     "rxjs": "^7.8.1",
@@ -99,6 +99,9 @@
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"
+    },
+    "moduleNameMapper": {
+      "^src/(.*)$": "<rootDir>/$1"
     },
     "collectCoverageFrom": [
       "**/*.(t|j)s"

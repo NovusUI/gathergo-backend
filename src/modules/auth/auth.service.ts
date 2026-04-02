@@ -1,6 +1,8 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
+  InternalServerErrorException,
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -17,66 +19,239 @@ import { ResetPasswordDto } from './dtos/reset-password.dto';
 import { ForgotPasswordDto } from './dtos/forgot-password.dto';
 import { OAuth2Client } from 'google-auth-library';
 import { FirebaseService } from '../firebase/firebase.service';
+import { MailService } from '../mail/mail.service';
+import { VerifyEmailCodeDto } from './dtos/verify-email-code.dto';
+import { ResendEmailVerificationCodeDto } from './dtos/resend-email-verification-code.dto';
+import {
+  getJwtExpiresIn,
+  getJwtRefreshExpiresIn,
+  getJwtRefreshSecret,
+  getJwtSecret,
+} from 'src/config/runtime-env';
+
+const DEFAULT_EMAIL_VERIFICATION_CODE_LENGTH = 6;
+const DEFAULT_EMAIL_VERIFICATION_EXPIRY_MINUTES = 10;
+const DEFAULT_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60;
+const DEFAULT_EMAIL_VERIFICATION_MAX_ATTEMPTS = 5;
+const DEFAULT_PASSWORD_RESET_CODE_LENGTH = 6;
+const DEFAULT_PASSWORD_RESET_EXPIRY_MINUTES = 10;
+const DEFAULT_PASSWORD_RESET_RESEND_COOLDOWN_SECONDS = 60;
+const DEFAULT_PASSWORD_RESET_MAX_ATTEMPTS = 5;
+
+type EmailPasswordUser = {
+  id: string;
+  email: string;
+  username?: string | null;
+  fullName?: string | null;
+  password?: string | null;
+  googleId?: string | null;
+  hasPreferences?: boolean;
+  isProfileComplete?: boolean;
+  isVerified: boolean;
+  resetToken?: string | null;
+  resetTokenExpiry?: Date | null;
+  resetTokenSentAt?: Date | null;
+  resetTokenAttempts?: number | null;
+  emailVerificationCodeHash?: string | null;
+  emailVerificationCodeExpiry?: Date | null;
+  emailVerificationSentAt?: Date | null;
+  emailVerificationAttempts?: number | null;
+};
 
 @Injectable()
 export class AuthService {
   private googleClient: OAuth2Client;
   private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly firebaseService: FirebaseService,
+    private readonly mailService: MailService,
   ) {
     this.googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
   }
 
-  // SIGNUP
   async signup(dto: SignupDto) {
-    // 1️⃣ Check if email already exists
+    const normalizedEmail = this.normalizeEmail(dto.email);
     const existingUser = await this.prisma.user.findUnique({
-      where: { email: dto.email.toLowerCase().trim() },
+      where: { email: normalizedEmail },
     });
 
     if (existingUser) {
       throw new ForbiddenException('Email already in use');
     }
 
-    // 2️⃣ Hash password
     const hashedPassword = await bcrypt.hash(dto.password, 12);
+    const verificationRequired = this.isEmailVerificationRequired();
 
-    // 3️⃣ Create user
     const user = await this.prisma.user.create({
       data: {
-        email: dto.email.toLowerCase().trim(),
+        email: normalizedEmail,
         password: hashedPassword,
+        isVerified: !verificationRequired,
       },
     });
 
-    // 4️⃣ Create JWT token
-    const token = await this.generateToken(user.id, user.email, user.username || undefined, {
-      secret: process.env.JWT_SECRET,
-      expiresIn: '15m',
-    });
+    if (verificationRequired) {
+      try {
+        await this.issueEmailVerificationCode(user, {
+          ignoreCooldown: true,
+        });
+      } catch (error) {
+        await this.prisma.user
+          .delete({ where: { id: user.id } })
+          .catch((cleanupError: unknown) => {
+            const reason =
+              cleanupError instanceof Error
+                ? cleanupError.message
+                : 'unknown cleanup error';
+            this.logger.error(
+              `Failed to rollback unverified signup for ${normalizedEmail}: ${reason}`,
+            );
+          });
 
-    const refreshToken = await this.generateToken(
-      user.id,
-      user.email,
-      user.username || undefined,
-    );
+        throw error;
+      }
 
-    await this.prisma.refreshToken.create({
-      data: {
-        token: refreshToken,
-        userId: user.id,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      },
-    });
+      return {
+        message: `We sent a ${this.getEmailVerificationCodeLength()}-digit verification code to your email.`,
+        email: normalizedEmail,
+        requiresVerification: true,
+      };
+    }
 
-    // 5️⃣ Return
+    this.queueWelcomeEmailForUser(user);
+    const { accessToken, refreshToken } = await this.login(user);
+
     return {
-      accessToken: token,
+      accessToken,
       user,
       refreshToken,
+    };
+  }
+
+  async verifyEmailCode(dto: VerifyEmailCodeDto) {
+    const normalizedEmail = this.normalizeEmail(dto.email);
+    const normalizedCode = this.normalizeVerificationCode(dto.code);
+    const user = await this.prisma.user.findUnique({
+      where: { email: normalizedEmail },
+    });
+
+    if (!user || !this.isEmailPasswordUser(user)) {
+      throw new BadRequestException('Invalid or expired verification code');
+    }
+
+    if (user.isVerified) {
+      return {
+        message: 'Email is already verified. Please sign in.',
+        email: normalizedEmail,
+        requiresVerification: false,
+      };
+    }
+
+    if (
+      !user.emailVerificationCodeHash ||
+      !user.emailVerificationCodeExpiry ||
+      user.emailVerificationCodeExpiry.getTime() <= Date.now()
+    ) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: this.getClearedEmailVerificationState(),
+      });
+
+      throw new BadRequestException(
+        'This verification code has expired. Request a new one.',
+      );
+    }
+
+    const providedCodeHash = this.hashValue(normalizedCode);
+    if (providedCodeHash !== user.emailVerificationCodeHash) {
+      const failedAttempts = (user.emailVerificationAttempts || 0) + 1;
+      if (failedAttempts >= this.getEmailVerificationMaxAttempts()) {
+        await this.prisma.user.update({
+          where: { id: user.id },
+          data: this.getClearedEmailVerificationState(),
+        });
+
+        throw new BadRequestException(
+          'Too many incorrect codes. Request a new verification code.',
+        );
+      }
+
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          emailVerificationAttempts: failedAttempts,
+        },
+      });
+
+      throw new BadRequestException('Invalid verification code');
+    }
+
+    const verifiedUser = await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        ...this.getClearedEmailVerificationState(),
+        isVerified: true,
+      },
+    });
+
+    this.queueWelcomeEmailForUser(verifiedUser);
+    const { accessToken, refreshToken } = await this.login(verifiedUser);
+
+    return {
+      message: 'Email verified successfully',
+      accessToken,
+      refreshToken,
+      user: verifiedUser,
+    };
+  }
+
+  async resendEmailVerificationCode(dto: ResendEmailVerificationCodeDto) {
+    const normalizedEmail = this.normalizeEmail(dto.email);
+    const user = await this.prisma.user.findUnique({
+      where: { email: normalizedEmail },
+    });
+
+    if (!user || !this.isEmailPasswordUser(user)) {
+      return {
+        message: 'If that email exists, a verification code has been sent.',
+        email: normalizedEmail,
+        requiresVerification: true,
+      };
+    }
+
+    if (!this.isEmailVerificationRequired()) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          ...this.getClearedEmailVerificationState(),
+          isVerified: true,
+        },
+      });
+
+      return {
+        message: 'Email verification is not required right now. Please sign in.',
+        email: normalizedEmail,
+        requiresVerification: false,
+      };
+    }
+
+    if (user.isVerified) {
+      return {
+        message: 'Email is already verified. Please sign in.',
+        email: normalizedEmail,
+        requiresVerification: false,
+      };
+    }
+
+    await this.issueEmailVerificationCode(user);
+
+    return {
+      message: `We sent a ${this.getEmailVerificationCodeLength()}-digit verification code to your email.`,
+      email: normalizedEmail,
+      requiresVerification: true,
     };
   }
 
@@ -99,18 +274,17 @@ export class AuthService {
     };
 
     const accessToken = this.jwtService.sign(payload, {
-      secret: process.env.JWT_SECRET,
-      expiresIn: '15m',
+      secret: getJwtSecret(),
+      expiresIn: getJwtExpiresIn(),
     });
 
     return { accessToken };
   }
 
-  // LOGIN
   async loginWithPassword(dto: LoginDto) {
-    // 1️⃣ Find user
-    const user = await this.prisma.user.findUnique({
-      where: { email: dto.email.toLowerCase().trim() },
+    const normalizedEmail = this.normalizeEmail(dto.email);
+    let user = await this.prisma.user.findUnique({
+      where: { email: normalizedEmail },
     });
 
     if (user && !user.password) {
@@ -123,13 +297,32 @@ export class AuthService {
       throw new ForbiddenException('Invalid credentials');
     }
 
-    // 2️⃣ Check password
     const isMatch = await bcrypt.compare(dto.password, user.password);
     if (!isMatch) {
       throw new ForbiddenException('Invalid credentials');
     }
 
-    // 3️⃣ Create JWT
+    if (!user.isVerified && this.isEmailPasswordUser(user)) {
+      if (!this.isEmailVerificationRequired()) {
+        user = await this.prisma.user.update({
+          where: { id: user.id },
+          data: {
+            ...this.getClearedEmailVerificationState(),
+            isVerified: true,
+          },
+        });
+      } else {
+        await this.ensureEmailVerificationCodeAvailable(user);
+        throw new ForbiddenException({
+          message:
+            'Email not verified. Enter the verification code sent to your inbox.',
+          code: 'EMAIL_NOT_VERIFIED',
+          email: normalizedEmail,
+          requiresVerification: true,
+        });
+      }
+    }
+
     const { accessToken, refreshToken } = await this.login(user);
 
     return {
@@ -140,7 +333,6 @@ export class AuthService {
   }
 
   async googleLogin(dto: GoogleLoginDto) {
-    // TODO: implement Google login logic
     return 'google login placeholder';
   }
 
@@ -159,55 +351,76 @@ export class AuthService {
   }
 
   async forgotPassword(dto: ForgotPasswordDto) {
+    const normalizedEmail = this.normalizeEmail(dto.email);
     const user = await this.prisma.user.findUnique({
-      where: { email: dto.email },
+      where: { email: normalizedEmail },
     });
 
-    if (user?.googleId && !user.password) {
-      throw new ForbiddenException(
-        'Google-authenticated accounts must use Google login',
-      );
+    if (!user || !this.isEmailPasswordUser(user)) {
+      return {
+        message: `If that email exists, we sent a ${this.getPasswordResetCodeLength()}-digit password reset code.`,
+        email: normalizedEmail,
+        requiresPasswordReset: true,
+      };
     }
 
-    if (!user) {
-      // Optionally, don't reveal user existence
-      throw new ForbiddenException(
-        'If the email exists, you will receive instructions',
-      );
-    }
-
-    const token = crypto.randomBytes(32).toString('hex');
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-
-    await this.prisma.user.update({
-      where: { email: dto.email },
-      data: {
-        resetToken: tokenHash,
-        resetTokenExpiry: new Date(Date.now() + 1000 * 60 * 60), // 1 hour
-      },
-    });
-    // TODO: send token via email channel (do not log secrets)
+    await this.issuePasswordResetCode(user);
 
     return {
-      message: 'If that email exists, you will receive a password reset link',
+      message: `If that email exists, we sent a ${this.getPasswordResetCodeLength()}-digit password reset code.`,
+      email: normalizedEmail,
+      requiresPasswordReset: true,
     };
   }
 
   async resetPassword(dto: ResetPasswordDto) {
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(dto.token)
-      .digest('hex');
-
-    const user = await this.prisma.user.findFirst({
-      where: {
-        resetToken: tokenHash,
-        resetTokenExpiry: { gt: new Date() },
-      },
+    const normalizedEmail = this.normalizeEmail(dto.email);
+    const normalizedCode = this.normalizeVerificationCode(dto.code);
+    const user = await this.prisma.user.findUnique({
+      where: { email: normalizedEmail },
     });
 
-    if (!user) {
-      throw new ForbiddenException('Invalid or expired token');
+    if (!user || !this.isEmailPasswordUser(user)) {
+      throw new BadRequestException('Invalid or expired reset code');
+    }
+
+    if (
+      !user.resetToken ||
+      !user.resetTokenExpiry ||
+      user.resetTokenExpiry.getTime() <= Date.now()
+    ) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: this.getClearedPasswordResetState(),
+      });
+
+      throw new BadRequestException(
+        'This reset code has expired. Request a new one.',
+      );
+    }
+
+    const providedCodeHash = this.hashValue(normalizedCode);
+    if (providedCodeHash !== user.resetToken) {
+      const failedAttempts = (user.resetTokenAttempts || 0) + 1;
+      if (failedAttempts >= this.getPasswordResetMaxAttempts()) {
+        await this.prisma.user.update({
+          where: { id: user.id },
+          data: this.getClearedPasswordResetState(),
+        });
+
+        throw new BadRequestException(
+          'Too many incorrect codes. Request a new password reset code.',
+        );
+      }
+
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          resetTokenAttempts: failedAttempts,
+        },
+      });
+
+      throw new BadRequestException('Invalid reset code');
     }
 
     const hashedPassword = await bcrypt.hash(dto.newPassword, 12);
@@ -216,8 +429,7 @@ export class AuthService {
       where: { id: user.id },
       data: {
         password: hashedPassword,
-        resetToken: null,
-        resetTokenExpiry: null,
+        ...this.getClearedPasswordResetState(),
       },
     });
 
@@ -229,13 +441,25 @@ export class AuthService {
     email: string;
     hasPrefrences: boolean;
     isProfileComplete: boolean;
+    isNewUser?: boolean;
+    username?: string | null;
+    fullName?: string | null;
   }) {
     const dbUser = await this.prisma.user.findUnique({
       where: { id: googleUser.id },
       select: {
         username: true,
+        fullName: true,
       },
     });
+
+    if (googleUser.isNewUser) {
+      this.queueWelcomeEmailForUser({
+        email: googleUser.email,
+        username: googleUser.username || dbUser?.username,
+        fullName: googleUser.fullName || dbUser?.fullName,
+      });
+    }
 
     const tokens = await this.login({
       id: googleUser.id,
@@ -331,7 +555,10 @@ export class AuthService {
     } else if (!user.isVerified) {
       user = await this.prisma.user.update({
         where: { id: user.id },
-        data: { isVerified: true },
+        data: {
+          ...this.getClearedEmailVerificationState(),
+          isVerified: true,
+        },
       });
     }
 
@@ -346,12 +573,27 @@ export class AuthService {
   }
 
   async me(userId: string) {
-    // TODO: return logged in user details
-    const user = await this.prisma.user.findFirst({
+    return this.prisma.user.findUnique({
       where: { id: userId },
+      select: {
+        id: true,
+        email: true,
+        username: true,
+        createdAt: true,
+        bio: true,
+        birthDate: true,
+        hasPreferences: true,
+        isProfileComplete: true,
+        nationality: true,
+        profilePicUrl: true,
+        updatedAt: true,
+        gender: true,
+        phoneNumber: true,
+        isVerified: true,
+        fullName: true,
+        profilePicUrlTN: true,
+      },
     });
-
-    return user;
   }
 
   private async login(user: any) {
@@ -364,26 +606,438 @@ export class AuthService {
     };
 
     const accessToken = this.jwtService.sign(payload, {
-      secret: process.env.JWT_SECRET,
-      expiresIn: '15m',
+      secret: getJwtSecret(),
+      expiresIn: getJwtExpiresIn(),
     });
 
     const refreshToken = this.jwtService.sign(payload, {
-      secret: process.env.JWT_REFRESH_SECRET,
-      expiresIn: '7d',
+      secret: getJwtRefreshSecret(),
+      expiresIn: getJwtRefreshExpiresIn(),
     });
 
     await this.prisma.refreshToken.create({
       data: {
         token: refreshToken,
         userId: user.id,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        expiresAt: new Date(
+          Date.now() + this.getRefreshTokenExpiryWindowMs(),
+        ),
       },
     });
 
     return { accessToken, refreshToken, user };
   }
-  // TOKEN HELPER
+
+  private async issueEmailVerificationCode(
+    user: EmailPasswordUser,
+    options?: { ignoreCooldown?: boolean },
+  ) {
+    if (!user.email) {
+      throw new InternalServerErrorException(
+        'Email verification is unavailable right now.',
+      );
+    }
+
+    const cooldownSeconds = this.getEmailVerificationResendCooldownSeconds();
+    const remainingCooldownSeconds = this.getRemainingCooldownSeconds(user);
+    if (!options?.ignoreCooldown && remainingCooldownSeconds > 0) {
+      throw new BadRequestException(
+        `Please wait ${remainingCooldownSeconds}s before requesting another verification code.`,
+      );
+    }
+
+    const code = this.generateNumericCode(this.getEmailVerificationCodeLength());
+    const expiry = new Date(
+      Date.now() + this.getEmailVerificationExpiryMinutes() * 60 * 1000,
+    );
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerificationCodeHash: this.hashValue(code),
+        emailVerificationCodeExpiry: expiry,
+        emailVerificationSentAt: new Date(),
+        emailVerificationAttempts: 0,
+      },
+    });
+
+    try {
+    
+      const result = await this.mailService.sendEmailVerificationCode({
+        to: user.email,
+        name: this.resolveWelcomeName(user),
+        code,
+        expiresInMinutes: this.getEmailVerificationExpiryMinutes(),
+      });
+    
+
+      if (result.skipped) {
+        throw new InternalServerErrorException(
+          'Email verification is unavailable right now.',
+        );
+      }
+
+      return {
+        email: user.email,
+        expiresAt: expiry,
+        cooldownSeconds,
+      };
+    } catch (error) {
+      await this.prisma.user
+        .update({
+          where: { id: user.id },
+          data: this.getClearedEmailVerificationState(),
+        })
+        .catch((cleanupError: unknown) => {
+          const reason =
+            cleanupError instanceof Error
+              ? cleanupError.message
+              : 'unknown cleanup error';
+          this.logger.error(
+            `Failed to clear email verification state for ${user.email}: ${reason}`,
+          );
+        });
+
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+
+      const reason =
+        error instanceof Error ? error.message : 'unknown mail dispatch error';
+      this.logger.error(
+        `Failed to queue email verification code for ${user.email}: ${reason}`,
+      );
+      throw new InternalServerErrorException(
+        'Email verification is unavailable right now.',
+      );
+    }
+  }
+
+  private async issuePasswordResetCode(
+    user: EmailPasswordUser,
+    options?: { ignoreCooldown?: boolean },
+  ) {
+    if (!user.email) {
+      throw new InternalServerErrorException(
+        'Password reset is unavailable right now.',
+      );
+    }
+
+    const remainingCooldownSeconds =
+      this.getRemainingPasswordResetCooldownSeconds(user);
+    if (!options?.ignoreCooldown && remainingCooldownSeconds > 0) {
+      throw new BadRequestException(
+        `Please wait ${remainingCooldownSeconds}s before requesting another reset code.`,
+      );
+    }
+
+    const code = this.generateNumericCode(this.getPasswordResetCodeLength());
+    const expiry = new Date(
+      Date.now() + this.getPasswordResetExpiryMinutes() * 60 * 1000,
+    );
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        resetToken: this.hashValue(code),
+        resetTokenExpiry: expiry,
+        resetTokenSentAt: new Date(),
+        resetTokenAttempts: 0,
+      },
+    });
+
+    try {
+      const result = await this.mailService.sendPasswordResetCode({
+        to: user.email,
+        name: this.resolveWelcomeName(user),
+        code,
+        expiresInMinutes: this.getPasswordResetExpiryMinutes(),
+      });
+
+      if (result.skipped) {
+        throw new InternalServerErrorException(
+          'Password reset is unavailable right now.',
+        );
+      }
+
+      return {
+        email: user.email,
+        expiresAt: expiry,
+      };
+    } catch (error) {
+      await this.prisma.user
+        .update({
+          where: { id: user.id },
+          data: this.getClearedPasswordResetState(),
+        })
+        .catch((cleanupError: unknown) => {
+          const reason =
+            cleanupError instanceof Error
+              ? cleanupError.message
+              : 'unknown cleanup error';
+          this.logger.error(
+            `Failed to clear password reset state for ${user.email}: ${reason}`,
+          );
+        });
+
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+
+      const reason =
+        error instanceof Error ? error.message : 'unknown mail dispatch error';
+      this.logger.error(
+        `Failed to queue password reset code for ${user.email}: ${reason}`,
+      );
+      throw new InternalServerErrorException(
+        'Password reset is unavailable right now.',
+      );
+    }
+  }
+
+  private async ensureEmailVerificationCodeAvailable(user: EmailPasswordUser) {
+    if (
+      user.emailVerificationCodeHash &&
+      user.emailVerificationCodeExpiry &&
+      user.emailVerificationCodeExpiry.getTime() > Date.now()
+    ) {
+      return;
+    }
+
+    if (this.getRemainingCooldownSeconds(user) > 0) {
+      return;
+    }
+
+    await this.issueEmailVerificationCode(user);
+  }
+
+  private queueWelcomeEmailForUser(user: {
+    email?: string | null;
+    username?: string | null;
+    fullName?: string | null;
+  }) {
+    if (!user.email) {
+      return;
+    }
+
+    void this.mailService
+      .sendWelcomeEmail({
+        to: user.email,
+        name: this.resolveWelcomeName(user),
+        loginLink: this.buildFrontendUrl('/login'),
+        profileSetupLink: this.buildFrontendUrl('/profile-setup'),
+        activationLink: this.buildFrontendUrl('/profile-setup'),
+      })
+      .catch((error: unknown) => {
+        const reason =
+          error instanceof Error ? error.message : 'unknown mail error';
+        this.logger.warn(
+          `Failed to queue welcome email for ${user.email}: ${reason}`,
+        );
+      });
+  }
+
+  private getClearedEmailVerificationState() {
+    return {
+      emailVerificationCodeHash: null,
+      emailVerificationCodeExpiry: null,
+      emailVerificationSentAt: null,
+      emailVerificationAttempts: 0,
+    };
+  }
+
+  private getClearedPasswordResetState() {
+    return {
+      resetToken: null,
+      resetTokenExpiry: null,
+      resetTokenSentAt: null,
+      resetTokenAttempts: 0,
+    };
+  }
+
+  private normalizeEmail(email: string) {
+    return email.toLowerCase().trim();
+  }
+
+  private normalizeVerificationCode(code: string) {
+    return code.replace(/[^\d]/g, '').trim();
+  }
+
+  private hashValue(value: string) {
+    return crypto.createHash('sha256').update(value).digest('hex');
+  }
+
+  private generateNumericCode(length: number) {
+    const max = 10 ** length;
+    const code = crypto.randomInt(0, max).toString().padStart(length, '0')
+    console.log(code)
+    return code ;
+  }
+
+  private isEmailVerificationRequired() {
+    return this.getBooleanEnv('AUTH_EMAIL_VERIFICATION_REQUIRED', false);
+  }
+
+  private getEmailVerificationCodeLength() {
+    const parsed = Number(process.env.AUTH_EMAIL_VERIFICATION_CODE_LENGTH);
+    if (!Number.isFinite(parsed)) {
+      return DEFAULT_EMAIL_VERIFICATION_CODE_LENGTH;
+    }
+
+    return Math.min(6, Math.max(4, Math.floor(parsed)));
+  }
+
+  private getEmailVerificationExpiryMinutes() {
+    const parsed = Number(process.env.AUTH_EMAIL_VERIFICATION_EXPIRY_MINUTES);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return DEFAULT_EMAIL_VERIFICATION_EXPIRY_MINUTES;
+    }
+
+    return Math.floor(parsed);
+  }
+
+  private getEmailVerificationResendCooldownSeconds() {
+    const parsed = Number(
+      process.env.AUTH_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS,
+    );
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return DEFAULT_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS;
+    }
+
+    return Math.floor(parsed);
+  }
+
+  private getEmailVerificationMaxAttempts() {
+    const parsed = Number(process.env.AUTH_EMAIL_VERIFICATION_MAX_ATTEMPTS);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return DEFAULT_EMAIL_VERIFICATION_MAX_ATTEMPTS;
+    }
+
+    return Math.floor(parsed);
+  }
+
+  private getPasswordResetCodeLength() {
+    const parsed = Number(process.env.AUTH_PASSWORD_RESET_CODE_LENGTH);
+    if (!Number.isFinite(parsed)) {
+      return DEFAULT_PASSWORD_RESET_CODE_LENGTH;
+    }
+
+    return Math.min(6, Math.max(4, Math.floor(parsed)));
+  }
+
+  private getPasswordResetExpiryMinutes() {
+    const parsed = Number(process.env.AUTH_PASSWORD_RESET_EXPIRY_MINUTES);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return DEFAULT_PASSWORD_RESET_EXPIRY_MINUTES;
+    }
+
+    return Math.floor(parsed);
+  }
+
+  private getPasswordResetResendCooldownSeconds() {
+    const parsed = Number(process.env.AUTH_PASSWORD_RESET_RESEND_COOLDOWN_SECONDS);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return DEFAULT_PASSWORD_RESET_RESEND_COOLDOWN_SECONDS;
+    }
+
+    return Math.floor(parsed);
+  }
+
+  private getPasswordResetMaxAttempts() {
+    const parsed = Number(process.env.AUTH_PASSWORD_RESET_MAX_ATTEMPTS);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return DEFAULT_PASSWORD_RESET_MAX_ATTEMPTS;
+    }
+
+    return Math.floor(parsed);
+  }
+
+  private getRemainingCooldownSeconds(user: EmailPasswordUser) {
+    if (!user.emailVerificationSentAt) {
+      return 0;
+    }
+
+    const cooldownMs =
+      this.getEmailVerificationResendCooldownSeconds() * 1000;
+    const remainingMs =
+      user.emailVerificationSentAt.getTime() + cooldownMs - Date.now();
+
+    return remainingMs > 0 ? Math.ceil(remainingMs / 1000) : 0;
+  }
+
+  private getRemainingPasswordResetCooldownSeconds(user: EmailPasswordUser) {
+    if (!user.resetTokenSentAt) {
+      return 0;
+    }
+
+    const cooldownMs = this.getPasswordResetResendCooldownSeconds() * 1000;
+    const remainingMs = user.resetTokenSentAt.getTime() + cooldownMs - Date.now();
+
+    return remainingMs > 0 ? Math.ceil(remainingMs / 1000) : 0;
+  }
+
+  private getBooleanEnv(key: string, defaultValue: boolean) {
+    const rawValue = process.env[key];
+    if (!rawValue) {
+      return defaultValue;
+    }
+
+    const normalizedValue = rawValue.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalizedValue)) {
+      return true;
+    }
+
+    if (['false', '0', 'no', 'off'].includes(normalizedValue)) {
+      return false;
+    }
+
+    return defaultValue;
+  }
+
+  private buildFrontendUrl(path: string) {
+    const baseUrl = process.env.FRONTEND_URL?.trim();
+
+    if (!baseUrl) {
+      return undefined;
+    }
+
+    const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+    const normalizedPath = path.replace(/^\/+/, '');
+
+    return `${normalizedBaseUrl}/${normalizedPath}`;
+  }
+
+  private resolveWelcomeName(user: {
+    email?: string | null;
+    username?: string | null;
+    fullName?: string | null;
+  }) {
+    const preferredName = user.fullName?.trim() || user.username?.trim();
+    if (preferredName) {
+      return preferredName;
+    }
+
+    const emailLocalPart = user.email?.split('@')[0]?.trim();
+    if (!emailLocalPart) {
+      return 'there';
+    }
+
+    return emailLocalPart
+      .split(/[._-]+/)
+      .filter(Boolean)
+      .map(
+        (segment) => segment.charAt(0).toUpperCase() + segment.slice(1),
+      )
+      .join(' ');
+  }
+
+  private isEmailPasswordUser(user: {
+    password?: string | null;
+    googleId?: string | null;
+  }) {
+    return Boolean(user.password && !user.googleId);
+  }
+
   async generateToken(userId: string, email: string, username?: string, option?) {
     const payload = { sub: userId, email, username };
     return option
@@ -391,15 +1045,36 @@ export class AuthService {
       : this.jwtService.sign(payload);
   }
 
+  private getRefreshTokenExpiryWindowMs(): number {
+    const expiresIn = getJwtRefreshExpiresIn();
+    const match = expiresIn.match(/^(\d+)([smhd])$/i);
+
+    if (!match) {
+      return 7 * 24 * 60 * 60 * 1000;
+    }
+
+    const amount = Number(match[1]);
+    const unit = match[2].toLowerCase();
+    const multipliers: Record<string, number> = {
+      s: 1000,
+      m: 60 * 1000,
+      h: 60 * 60 * 1000,
+      d: 24 * 60 * 60 * 1000,
+    };
+
+    return amount * multipliers[unit];
+  }
+
   async newGoogleLogin(idToken: string) {
-    console.log('i am not calling this endpoint');
     const ticket = await this.googleClient.verifyIdToken({
       idToken,
       audience: process.env.GOOGLE_CLIENT_ID,
     });
 
     const payload = ticket.getPayload();
-    if (!payload) throw new UnauthorizedException('Invalid Google token');
+    if (!payload) {
+      throw new UnauthorizedException('Invalid Google token');
+    }
 
     const { sub: googleId, email, name, picture } = payload;
 
@@ -414,32 +1089,16 @@ export class AuthService {
           email,
           fullName: name || '',
           profilePicUrl: picture,
+          isVerified: true,
         },
       });
 
-      const payload = { sub: user.id, email, username: user.username };
-
-      const accessToken = this.jwtService.sign(payload, {
-        secret: process.env.JWT_SECRET,
-        expiresIn: '15m',
-      });
-
-      const refreshToken = this.jwtService.sign(payload, {
-        secret: process.env.JWT_REFRESH_SECRET,
-        expiresIn: '7d',
-      });
-
-      await this.prisma.refreshToken.create({
-        data: {
-          token: refreshToken,
-          userId: user.id,
-          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        },
-      });
+      this.queueWelcomeEmailForUser(user);
+      const { accessToken, refreshToken } = await this.login(user);
 
       return {
-        accessToken: accessToken,
-        refreshToken: refreshToken,
+        accessToken,
+        refreshToken,
         user,
       };
     }

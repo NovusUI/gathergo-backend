@@ -9,54 +9,66 @@ datasource db {
 }
 
 model User {
-  id                    String                 @id @default(uuid())
-  email                 String                 @unique
-  username              String?                @unique
-  password              String?
-  createdAt             DateTime               @default(now())
-  bio                   String?
-  birthDate             DateTime?
-  googleId              String?                @unique
-  hasPreferences        Boolean                @default(false)
-  isProfileComplete     Boolean                @default(false)
-  nationality           String?
-  profilePicUrl         String?
-  updatedAt             DateTime?              @updatedAt
-  gender                Gender?
-  phoneNumber           String?
-  resetToken            String?
-  resetTokenExpiry      DateTime?
-  isVerified            Boolean                @default(false)
-  fullName              String?
-  profilePicUrlTN       String?
-  Carpool               Carpool[]
-  CarpoolPassenger      CarpoolPassenger[]
-  Comment               Comment[]
-  communities           Community[]
-  communityFollows      CommunityFollow[]
-  DeviceToken           DeviceToken[]
-  eventsCreated         Event[]                @relation("UserEvents")
-  Like                  Like[]
-  Message               Message[]
-  receivedNotifications Notification[]         @relation("NotificationRecipient")
-  sentNotifications     Notification[]         @relation("NotificationSender")
-  Post                  Post[]
-  Registration          Registration[]
-  Ticket                Ticket[]
-  Donation              Donation[]
-  TransactionReference  TransactionReference[]
-  following             UserFollow[]           @relation("Follower")
-  followedBy            UserFollow[]           @relation("Following")
-  preference            UserPreference?
-  commentsMentioned     Comment[]              @relation("CommentMentions")
-  readMessages          Message[]              @relation("MessageReadBy")
-  postsMentions         Post[]                 @relation("PostMentions")
-  refreshTokens         RefreshToken[]
-  feeds                 Feed[]
-  hiddenFeeds           HiddenFeed[]
-  scannerPermissions    ScannerPermission[]    @relation("ScannerPermissions")
-  grantedPermissions    ScannerPermission[]    @relation("PermissionOwner")
-  scanLogs              ScanLog[]
+  id                          String                    @id @default(uuid())
+  email                       String                    @unique
+  username                    String?                   @unique
+  password                    String?
+  createdAt                   DateTime                  @default(now())
+  bio                         String?
+  birthDate                   DateTime?
+  googleId                    String?                   @unique
+  hasPreferences              Boolean                   @default(false)
+  isProfileComplete           Boolean                   @default(false)
+  nationality                 String?
+  profilePicUrl               String?
+  updatedAt                   DateTime?                 @updatedAt
+  gender                      Gender?
+  phoneNumber                 String?
+  resetToken                  String?
+  resetTokenExpiry            DateTime?
+  resetTokenSentAt            DateTime?
+  resetTokenAttempts          Int                       @default(0)
+  emailVerificationCodeHash   String?
+  emailVerificationCodeExpiry DateTime?
+  emailVerificationSentAt     DateTime?
+  emailVerificationAttempts   Int                       @default(0)
+  isVerified                  Boolean                   @default(false)
+  fullName                    String?
+  profilePicUrlTN             String?
+  Carpool                     Carpool[]
+  CarpoolPassenger            CarpoolPassenger[]
+  Comment                     Comment[]
+  communities                 Community[]
+  communityFollows            CommunityFollow[]
+  DeviceToken                 DeviceToken[]
+  eventsCreated               Event[]                   @relation("UserEvents")
+  Like                        Like[]
+  Message                     Message[]
+  receivedNotifications       Notification[]            @relation("NotificationRecipient")
+  sentNotifications           Notification[]            @relation("NotificationSender")
+  Post                        Post[]
+  Registration                Registration[]
+  Ticket                      Ticket[]
+  Donation                    Donation[]
+  buyerTransactions           TransactionReference[]    @relation("BuyerTransactions")
+  creatorTransactions         TransactionReference[]    @relation("CreatorTransactions")
+  following                   UserFollow[]              @relation("Follower")
+  followedBy                  UserFollow[]              @relation("Following")
+  preference                  UserPreference?
+  commentsMentioned           Comment[]                 @relation("CommentMentions")
+  readMessages                Message[]                 @relation("MessageReadBy")
+  postsMentions               Post[]                    @relation("PostMentions")
+  refreshTokens               RefreshToken[]
+  feeds                       Feed[]
+  hiddenFeeds                 HiddenFeed[]
+  scannerPermissions          ScannerPermission[]       @relation("ScannerPermissions")
+  grantedPermissions          ScannerPermission[]       @relation("PermissionOwner")
+  scanLogs                    ScanLog[]
+  settlementProfile           CreatorSettlementProfile?
+  alatProfile                 CreatorAlatProfile?
+  kycVerification             CreatorKycVerification?
+  settlementAccountChanges    SettlementAccountChange[]
+  settlementRecords           SettlementRecord[]
 }
 
 model UserPreference {
@@ -110,6 +122,10 @@ model Event {
   id                    String           @id @default(uuid())
   title                 String
   description           String?
+  impactTitle           String?
+  impactDescription     String?
+  impactPercentage      Int?
+  isPhysicalEvent       Boolean          @default(true)
   imageUrl              String?
   location              String?
   links                 String[]
@@ -125,6 +141,7 @@ model Event {
   registrationAttendees Int?
   registrationFee       Int?
   donationTarget        Int?
+  impactMapSentAt       DateTime?
   thumbnailUrl          String?
   registrationType      RegistrationType
   carpools              Carpool[]
@@ -138,9 +155,9 @@ model Event {
   isImageProcessing     Boolean          @default(false)
   feeds                 Feed[]
 
-  transactions       TransactionReference[]
+  transactions TransactionReference[]
 
-  scanLogs           ScanLog[]
+  scanLogs ScanLog[]
 }
 
 model EventTicket {
@@ -215,16 +232,203 @@ model Donation {
 }
 
 model TransactionReference {
-  id        String                @id @default(uuid())
-  userId    String
-  amount    Int
-  createdAt DateTime              @default(now())
-  updatedAt DateTime              @updatedAt
-  metadata  Json
-  status    TransactionStatusType @default(PENDING)
-  user      User                  @relation(fields: [userId], references: [id])
-  eventId   String?
-  event     Event?                @relation(fields: [eventId], references: [id])
+  id                    String                 @id @default(uuid())
+  userId                String
+  creatorId             String?
+  amount                Int
+  platformFee           Int                    @default(0)
+  providerFee           Int                    @default(0)
+  creatorPayable        Int                    @default(0)
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  metadata              Json
+  riskReasons           Json                   @default("[]")
+  status                TransactionStatusType  @default(PENDING)
+  paymentProvider       PaymentProvider        @default(PAYSTACK)
+  paymentType           PaymentType?
+  settlementStatus      SettlementStatus       @default(NOT_READY)
+  riskStatus            RiskStatus             @default(CLEAR)
+  riskScore             Int                    @default(0)
+  providerReference     String?
+  providerPayload       Json?
+  fulfilledAt           DateTime?
+  settledAt             DateTime?
+  reviewedAt            DateTime?
+  user                  User                   @relation("BuyerTransactions", fields: [userId], references: [id])
+  creator               User?                  @relation("CreatorTransactions", fields: [creatorId], references: [id])
+  eventId               String?
+  event                 Event?                 @relation(fields: [eventId], references: [id])
+  settlementAllocations SettlementAllocation[]
+  webhookEvents         ProviderWebhookEvent[]
+
+  @@index([eventId, status])
+  @@index([creatorId, status])
+  @@index([creatorId, settlementStatus])
+  @@index([paymentProvider, status])
+  @@index([riskStatus])
+}
+
+model CreatorSettlementProfile {
+  id                       String                         @id @default(uuid())
+  userId                   String                         @unique
+  legalName                String?
+  businessName             String?
+  status                   CreatorSettlementProfileStatus @default(NOT_STARTED)
+  accountOwnershipType     AccountOwnershipType           @default(UNKNOWN)
+  bankName                 String?
+  bankCode                 String?
+  accountNumber            String?
+  accountNumberMasked      String?
+  accountName              String?
+  bvnLast4                 String?
+  accountVerifiedAt        DateTime?
+  kycStatus                KycVerificationStatus          @default(NOT_STARTED)
+  nameMatchStatus          NameMatchStatus                @default(NOT_CHECKED)
+  metadata                 Json                           @default("{}")
+  submittedAt              DateTime?
+  approvedAt               DateTime?
+  rejectedAt               DateTime?
+  rejectionReason          String?
+  createdAt                DateTime                       @default(now())
+  updatedAt                DateTime                       @updatedAt
+  user                     User                           @relation(fields: [userId], references: [id])
+  kycVerification          CreatorKycVerification?
+  settlementAccountChanges SettlementAccountChange[]
+}
+
+model CreatorAlatProfile {
+  id                  String                   @id @default(uuid())
+  userId              String                   @unique
+  status              CreatorAlatProfileStatus @default(NOT_STARTED)
+  displayName         String?
+  businessId          String?
+  subaccountReference String?
+  accountNumber       String?
+  accountName         String?
+  activatedAt         DateTime?
+  deactivatedAt       DateTime?
+  reviewedAt          DateTime?
+  notes               String?
+  metadata            Json                     @default("{}")
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+  user                User                     @relation(fields: [userId], references: [id])
+}
+
+model CreatorKycVerification {
+  id                      String                   @id @default(uuid())
+  userId                  String                   @unique
+  settlementProfileId     String                   @unique
+  provider                VerificationProvider     @default(QOREID)
+  status                  KycVerificationStatus    @default(NOT_STARTED)
+  accountOwnershipType    AccountOwnershipType     @default(UNKNOWN)
+  verificationMode        String?
+  phoneNumber             String?
+  identityType            String?
+  identityReferenceMasked String?
+  identityReferenceLast4  String?
+  providerSubjectHash     String?
+  providerSubjectLast4    String?
+  businessReferenceHash   String?
+  businessReferenceLast4  String?
+  nameDobHash             String?
+  verifiedFullName        String?
+  verifiedBusinessName    String?
+  verifiedDateOfBirth     DateTime?
+  qoreIdentityCheckId     String?
+  qoreBusinessCheckId     String?
+  qoreLivenessCheckId     String?
+  qoreAmlCheckId          String?
+  businessStatus          KycVerificationStatus    @default(NOT_STARTED)
+  identityStatus          KycVerificationStatus    @default(NOT_STARTED)
+  livenessStatus          KycVerificationStatus    @default(NOT_STARTED)
+  amlStatus               KycVerificationStatus    @default(NOT_STARTED)
+  dedupStatus             KycVerificationStatus    @default(NOT_STARTED)
+  nameMatchStatus         NameMatchStatus          @default(NOT_CHECKED)
+  nameMatchScore          Float?
+  nameMatchReason         String?
+  submittedAt             DateTime?
+  reviewedAt              DateTime?
+  rejectionReason         String?
+  metadata                Json                     @default("{}")
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  user                    User                     @relation(fields: [userId], references: [id])
+  settlementProfile       CreatorSettlementProfile @relation(fields: [settlementProfileId], references: [id])
+
+  @@index([providerSubjectHash])
+  @@index([businessReferenceHash])
+  @@index([nameDobHash])
+}
+
+model SettlementAccountChange {
+  id                          String                   @id @default(uuid())
+  userId                      String
+  settlementProfileId         String
+  previousBankName            String?
+  previousBankCode            String?
+  previousAccountNumberMasked String?
+  previousAccountName         String?
+  previousOwnershipType       AccountOwnershipType?
+  newBankName                 String?
+  newBankCode                 String?
+  newAccountNumberMasked      String?
+  newAccountName              String?
+  newOwnershipType            AccountOwnershipType?
+  nameChanged                 Boolean                  @default(false)
+  ownershipTypeChanged        Boolean                  @default(false)
+  requiresReview              Boolean                  @default(true)
+  changedBy                   String
+  reason                      String?
+  metadata                    Json                     @default("{}")
+  createdAt                   DateTime                 @default(now())
+  user                        User                     @relation(fields: [userId], references: [id])
+  settlementProfile           CreatorSettlementProfile @relation(fields: [settlementProfileId], references: [id])
+
+  @@index([userId, createdAt])
+}
+
+model SettlementRecord {
+  id                       String                 @id @default(uuid())
+  creatorId                String
+  amount                   Int
+  status                   SettlementRecordStatus @default(PENDING)
+  reference                String                 @unique
+  destinationBankName      String?
+  destinationAccountNumber String?
+  destinationAccountName   String?
+  metadata                 Json                   @default("{}")
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+  processedAt              DateTime?
+  creator                  User                   @relation(fields: [creatorId], references: [id])
+  allocations              SettlementAllocation[]
+
+  @@index([creatorId, status])
+}
+
+model SettlementAllocation {
+  id                     String               @id @default(uuid())
+  settlementId           String
+  transactionReferenceId String               @unique
+  amount                 Int
+  createdAt              DateTime             @default(now())
+  settlement             SettlementRecord     @relation(fields: [settlementId], references: [id], onDelete: Cascade)
+  transactionReference   TransactionReference @relation(fields: [transactionReferenceId], references: [id])
+
+  @@index([settlementId])
+}
+
+model ProviderWebhookEvent {
+  id                     String                @id @default(cuid())
+  provider               PaymentProvider
+  eventKey               String                @unique
+  transactionReferenceId String?
+  payload                Json
+  createdAt              DateTime              @default(now())
+  transactionReference   TransactionReference? @relation(fields: [transactionReferenceId], references: [id], onDelete: SetNull)
+
+  @@index([provider, createdAt])
 }
 
 model Carpool {
@@ -237,6 +441,7 @@ model Carpool {
   availableSeats Int                                   @default(3)
   pricePerSeat   Float                                 @default(0)
   description    String?
+  vehicleIcon    String?
   status         String                                @default("ACTIVE")
   createdAt      DateTime                              @default(now())
   updatedAt      DateTime                              @updatedAt
@@ -384,6 +589,89 @@ enum TransactionStatusType {
   SUCCESS
   PENDING
   FAILED
+  AWAITING_TRANSFER
+}
+
+enum PaymentProvider {
+  PAYSTACK
+  ALAT_TRANSFER
+}
+
+enum PaymentType {
+  TICKET
+  REGISTRATION
+  DONATION
+}
+
+enum SettlementStatus {
+  NOT_READY
+  HELD_KYC
+  HELD_RISK
+  READY
+  PROCESSING
+  SETTLED
+  FAILED
+}
+
+enum RiskStatus {
+  CLEAR
+  REVIEW
+  HOLD
+  BLOCKED
+}
+
+enum CreatorSettlementProfileStatus {
+  NOT_STARTED
+  ACCOUNT_PROVIDED
+  ACCOUNT_VERIFIED
+  PENDING_KYC
+  REVIEW_REQUIRED
+  ACTIVE
+  REJECTED
+  RESTRICTED
+}
+
+enum AccountOwnershipType {
+  UNKNOWN
+  PERSONAL
+  BUSINESS
+}
+
+enum KycVerificationStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  PENDING_PROVIDER
+  SUBMITTED
+  VERIFIED
+  REJECTED
+  EXPIRED
+}
+
+enum NameMatchStatus {
+  NOT_CHECKED
+  MATCHED
+  REVIEW_REQUIRED
+  MISMATCH
+}
+
+enum VerificationProvider {
+  QOREID
+}
+
+enum CreatorAlatProfileStatus {
+  NOT_STARTED
+  PENDING_REVIEW
+  ACTIVE
+  INACTIVE
+  REJECTED
+}
+
+enum SettlementRecordStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  CANCELLED
 }
 
 enum Reoccurring {
@@ -455,24 +743,21 @@ model HiddenFeed {
 
 // Add to your existing schema
 
-
 model ScannerPermission {
   id        String    @id @default(uuid())
-  ownerId   String    // Event owner who granted permission
-  scannerId String    // User who can scan
+  ownerId   String // Event owner who granted permission
+  scannerId String // User who can scan
   createdAt DateTime  @default(now())
   expiresAt DateTime? // Optional expiration
   isActive  Boolean   @default(true)
-  isDeleted  Boolean   @default(false)
+  isDeleted Boolean   @default(false)
   // Relations
-  owner   User   @relation("PermissionOwner", fields: [ownerId], references: [id])
-  scanner User   @relation("ScannerPermissions", fields: [scannerId], references: [id])
-  
+  owner     User      @relation("PermissionOwner", fields: [ownerId], references: [id])
+  scanner   User      @relation("ScannerPermissions", fields: [scannerId], references: [id])
 
   // Unique constraint: an owner can grant permission to a scanner only once
   @@unique([ownerId, scannerId])
 }
-
 
 model ScanLog {
   id             String   @id @default(uuid())

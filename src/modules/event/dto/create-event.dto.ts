@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
+  IsBoolean,
   IsArray,
   IsDateString,
   IsEnum,
@@ -9,12 +11,15 @@ import {
   IsString,
   IsUrl,
   ValidateIf,
+  Max,
+  MaxLength,
   Min,
 } from 'class-validator';
 
 import { Reoccurring } from '@prisma/client';
 import { IsDateAfterMinutes } from 'src/common/validators/date-min-offset.decorator';
 import { IsDateGreaterThan } from 'src/common/validators/date-greater-than.decorator';
+import { normalizeEventLinks } from 'src/modules/event/event-links.util';
 import { Transform } from 'class-transformer';
 
 enum RegistrationType {
@@ -22,6 +27,16 @@ enum RegistrationType {
   REGISTRATION = 'registration',
   DONATION = 'donation',
 }
+
+const coerceBoolean = (value: unknown) => {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+
+  return value === true || value === 'true' || value === 1 || value === '1';
+};
+
+const isPhysicalEventEnabled = (value: unknown) => value !== false && value !== 'false';
 
 export class CreateEventDto {
   @ApiProperty()
@@ -36,19 +51,53 @@ export class CreateEventDto {
 
   @ApiPropertyOptional()
   @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  impactTitle?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(180)
+  impactDescription?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(100)
+  impactPercentage?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsUrl()
   imageUrl?: string;
 
-  @ApiProperty()
+  @ApiPropertyOptional({ default: true })
+  @IsOptional()
+  @Transform(({ obj, key }) => coerceBoolean(obj?.[key]), { toClassOnly: true })
+  @IsBoolean()
+  isPhysicalEvent?: boolean;
+
+  @ApiPropertyOptional()
+  @Transform(({ value, obj }) => {
+    if (!isPhysicalEventEnabled(coerceBoolean(obj?.isPhysicalEvent))) {
+      return undefined;
+    }
+
+    return typeof value === 'string' ? value.trim() : value;
+  })
+  @ValidateIf((o) => isPhysicalEventEnabled(o.isPhysicalEvent))
   @IsNotEmpty()
   @IsString()
-  location: string;
+  location?: string;
 
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(5)
   @IsUrl({}, { each: true })
-  @Transform(({ value }) => (Array.isArray(value) ? value : [value]))
+  @Transform(({ value }) => normalizeEventLinks(value))
   links?: string[];
 
   @ApiPropertyOptional({ type: [String] })

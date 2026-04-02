@@ -58,12 +58,19 @@ export class UpdatePermissionDto {
 export class PermissionResponseDto {
   id: string;
   scannerId: string;
-  scannerName: string;
-  scannerEmail: string;
-  scannerImage?: string;
   ownerId: string;
-  ownerName: string;
-  ownerEmail: string;
+  scanner: {
+    id: string;
+    username?: string | null;
+    fullName?: string | null;
+    profilePicUrl?: string | null;
+  };
+  owner: {
+    id: string;
+    username?: string | null;
+    fullName?: string | null;
+    profilePicUrl?: string | null;
+  };
   isActive: boolean;
   expiresAt?: Date;
   createdAt: Date;

@@ -4,6 +4,7 @@ import { PassportStrategy } from '@nestjs/passport';
 import { Strategy, VerifyCallback } from 'passport-google-oauth20';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { getGoogleCallbackUrl } from 'src/config/runtime-env';
 
 @Injectable()
 export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
@@ -11,7 +12,7 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
     super({
       clientID: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: 'http://localhost:4000/api/v1/auth/google/redirect',
+      callbackURL: getGoogleCallbackUrl(),
       scope: ['email', 'profile'],
       passReqToCallback: true, // This means validate gets 'request' as first param
     });
@@ -43,12 +44,21 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
 
       // CASE 1: Existing Google user
       if (user && user?.googleId === id) {
+        if (!user.isVerified) {
+          user = await this.prisma.user.update({
+            where: { id: user.id },
+            data: { isVerified: true },
+          });
+        }
+
         return done(null, {
           id: user.id,
           email: user.email,
           redirectUrl, // Pass redirect URL along
           hasPreferences: user.hasPreferences,
           isProfileComplete: user.isProfileComplete,
+          isNewUser: false,
+          fullName: user.fullName,
         });
       }
 
@@ -60,6 +70,7 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
             googleId: id,
             profilePicUrl: photos[0]?.value || user.profilePicUrl,
             password: null,
+            isVerified: true,
           },
         });
         return done(null, {
@@ -68,6 +79,8 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
           redirectUrl,
           hasPreferences: updatedUser.hasPreferences,
           isProfileComplete: user.isProfileComplete,
+          isNewUser: false,
+          fullName: updatedUser.fullName,
         });
       }
 
@@ -78,6 +91,7 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
             email,
             googleId: id,
             profilePicUrl: photos[0]?.value,
+            isVerified: true,
           },
         });
         return done(null, {
@@ -86,6 +100,8 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
           redirectUrl,
           hasPreferences: newUser.hasPreferences,
           isProfileComplete: newUser.isProfileComplete,
+          isNewUser: true,
+          fullName: displayName || null,
         });
       }
 

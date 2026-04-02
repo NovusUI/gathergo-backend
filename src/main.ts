@@ -1,13 +1,20 @@
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { DocumentBuilder,SwaggerModule } from '@nestjs/swagger'
 import { ResponseInterceptor } from './common/interceptors/response.interceptors';
 import { ValidationPipe } from '@nestjs/common';
+import { createCorsOriginValidator, getPort } from './config/runtime-env';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    rawBody: true,
+  });
+  const port = getPort();
 
   app.setGlobalPrefix('api/v1')
+  app.enableShutdownHooks();
+  app.set('trust proxy', 1);
   // Swagger configuration
 
   const config = new DocumentBuilder()
@@ -29,12 +36,12 @@ async function bootstrap() {
   }));
 
   app.enableCors({
-    origin: process.env.FRONTEND_URL, // Specify your frontend URL
+    origin: createCorsOriginValidator(),
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS','PATCH'],
-    allowedHeaders: ['Authorization', 'Content-Type']
+    allowedHeaders: ['Authorization', 'Content-Type', 'x-ops-key']
   });
   
-  await app.listen(process.env.PORT ?? 3000);
+  await app.listen(port, '0.0.0.0');
 }
 bootstrap();

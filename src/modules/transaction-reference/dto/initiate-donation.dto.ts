@@ -1,6 +1,19 @@
 // src/transaction-reference/dto/initiate-donation.dto.ts
-import { ApiProperty } from '@nestjs/swagger';
-import { IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
+import {
+  IsEnum,
+  IsNumber,
+  IsOptional,
+  IsString,
+  MaxLength,
+  Min,
+  ValidateNested,
+} from 'class-validator';
+import {
+  PaymentClientContextDto,
+  PaymentProviderDto,
+} from './payment-provider.dto';
 
 export class InitiateDonationDto {
   @ApiProperty({
@@ -11,13 +24,13 @@ export class InitiateDonationDto {
   eventId: string;
 
   @ApiProperty({
-    description: 'Donation amount in kobo (₦50,000 = 50000 kobo)',
-    example: 50000,
-    minimum: 50000,
+    description: 'Donation amount in naira',
+    example: 500,
+    minimum: 500,
   })
   @IsNumber()
-  @Min(50000, { message: 'Minimum donation amount is ₦50,000 (50000 kobo)' })
-  amount: number; // in kobo
+  @Min(500, { message: 'Minimum donation amount is ₦500' })
+  amount: number;
 
   @ApiProperty({
     description: 'Optional message from donor',
@@ -26,6 +39,7 @@ export class InitiateDonationDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   message?: string;
 
   @ApiProperty({
@@ -36,4 +50,18 @@ export class InitiateDonationDto {
   })
   @IsOptional()
   isAnonymous?: boolean = false;
+
+  @ApiPropertyOptional({
+    enum: PaymentProviderDto,
+    default: PaymentProviderDto.PAYSTACK,
+  })
+  @IsOptional()
+  @IsEnum(PaymentProviderDto)
+  provider?: PaymentProviderDto = PaymentProviderDto.PAYSTACK;
+
+  @ApiPropertyOptional({ type: PaymentClientContextDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => PaymentClientContextDto)
+  clientContext?: PaymentClientContextDto;
 }

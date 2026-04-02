@@ -24,7 +24,7 @@ export const notificationConstants = {
 
   EVENT_TICKET_SALE: 'event_ticket_sale',
   EVENT_TICKET_SALE_MESSAGE: (name) =>
-    `${name ?? 'A user '} just bout a ticket`,
+    `${name ?? 'A user '} just bought a ticket`,
   EVENT_TICKET_SALE_TITLE: 'Ticket sale alert!',
 
   EVENT_REGISTRATION: 'event_registration',
@@ -36,4 +36,7 @@ export const notificationConstants = {
   EVENT_DONATION_TITLE: 'Donation alert!',
   EVENT_DONATION_MESSAGE: (name: string, amount: number) =>
     `${name ?? 'A user '} just donated ${amount}`,
+
+  KYC_VERIFICATION_UPDATE: 'kyc_verification_update',
+  KYC_VERIFICATION_UPDATE_TITLE: 'Verification update',
 };

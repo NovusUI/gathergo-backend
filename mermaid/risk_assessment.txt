@@ -1,0 +1,68 @@
+```mermaid
+flowchart TD
+  A["Paid ticket, registration, or donation starts"] --> B["assessRisk(...)"]
+
+  B --> C{"Immediate block?"}
+  C -->|"Missing buyer or creator"| D["BLOCKED"]
+  C -->|"Buyer attempts for same event >= 8 in 1 hour"| D
+  C -->|"Unverified creator exposure cap exceeded"| D
+  D --> E["Initiation rejected"]
+
+  C -->|"No"| F["Build riskScore and riskReasons"]
+
+  F --> G["Signals checked:
+  self-purchase
+  large payment
+  new buyer
+  new creator
+  buyer same-event velocity
+  creator sales spike
+  deviceId recorded"]
+
+  G --> H{"Creator payout profile ACTIVE?"}
+  H -->|"No"| I["HOLD
+  settlementStatus = HELD_KYC
+  reason includes creator_kyc_pending"]
+  H -->|"Yes"| J{"riskScore >= 60?"}
+  J -->|"Yes"| K["HOLD
+  settlementStatus = HELD_RISK"]
+  J -->|"No"| L{"riskScore >= 35?"}
+  L -->|"Yes"| M["REVIEW
+  settlementStatus = HELD_RISK"]
+  L -->|"No"| N["CLEAR
+  settlementStatus = READY"]
+
+  I --> O["Create TransactionReference
+  store riskStatus, riskScore, riskReasons"]
+  K --> O
+  M --> O
+  N --> O
+
+  O --> P["Initialize provider payment"]
+  P --> Q["Webhook or transfer verification succeeds"]
+  Q --> R["completeCollectedTransaction(...)"]
+  R --> S["Issue ticket, create registration, or record donation"]
+
+  S --> T{"Resolve settlement status again"}
+  T -->|"Creator ACTIVE and risk CLEAR"| U["READY"]
+  T -->|"Creator ACTIVE and risk REVIEW or HOLD"| V["HELD_RISK"]
+  T -->|"Creator not ACTIVE"| W["HELD_KYC"]
+
+  U --> X["Wallet available balance"]
+  V --> Y["Wallet held balance"]
+  W --> Y
+
+  Z["Internal ops reviews KYC or payout profile"] --> AA["syncCreatorSettlementStatus(...)"]
+  AA --> AB{"Creator profile ACTIVE?"}
+  AB -->|"Yes and tx risk CLEAR"| AC["Successful tx -> READY"]
+  AB -->|"Yes and tx risk REVIEW or HOLD"| AD["Successful tx -> HELD_RISK"]
+  AB -->|"No"| AE["Successful tx -> HELD_KYC"]
+
+  AC --> AF["Internal settlement endpoint selects READY transactions only"]
+  AF --> AG["Settlement created
+  tx -> PROCESSING"]
+  AG --> AH{"Settlement result"}
+  AH -->|"SUCCESS"| AI["tx -> SETTLED"]
+  AH -->|"FAILED or CANCELLED"| AJ["tx -> READY"]
+
+```

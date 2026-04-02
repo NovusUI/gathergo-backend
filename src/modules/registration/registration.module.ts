@@ -7,9 +7,10 @@ import { PrismaModule } from 'src/prisma/prisma.module';
 import { RegistrationController } from './registration.controller';
 import { FeedIntegrationService } from '../feed/feed-integration.service';
 import { FeedService } from '../feed/feed.service';
+import { MailModule } from '../mail/mail.module';
 
 @Module({
-  imports: [PrismaModule, NotificationModule, FeedModule],
+  imports: [PrismaModule, NotificationModule, FeedModule, MailModule],
   controllers: [RegistrationController],
   providers: [RegistrationService, FeedIntegrationService, FeedService],
   exports: [RegistrationService],

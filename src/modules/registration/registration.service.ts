@@ -1,17 +1,21 @@
 // registration.service.ts
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { generateOpaqueCode } from 'src/common/utils/generate-opaque-code.util';
 import { PrismaService } from 'src/prisma/prisma.service';
-import { nanoid } from 'nanoid';
 import { NotificationService } from '../notification/notification.service';
 import { notificationConstants } from 'src/common/constants';
 import { FeedIntegrationService } from '../feed/feed-integration.service';
+import { MailService } from '../mail/mail.service';
 
 @Injectable()
 export class RegistrationService {
+  private readonly logger = new Logger(RegistrationService.name);
+
   constructor(
-    private prisma: PrismaService,
-    private notificationService: NotificationService,
-    private feedIntegrationService: FeedIntegrationService,
+    private readonly prisma: PrismaService,
+    private readonly notificationService: NotificationService,
+    private readonly feedIntegrationService: FeedIntegrationService,
+    private readonly mailService: MailService,
   ) {}
 
   async createRegistration(
@@ -53,7 +57,7 @@ export class RegistrationService {
       data: {
         eventId,
         userId,
-        qrCode: nanoid(16),
+        qrCode: generateOpaqueCode(16),
         transactionId,
         status: 'active',
       },
@@ -65,6 +69,7 @@ export class RegistrationService {
             thumbnailUrl: true,
             startDate: true,
             endDate: true,
+            location: true,
           },
         },
         user: {
@@ -98,10 +103,75 @@ export class RegistrationService {
 
     // Generate feed for registration
     this.feedIntegrationService
-      .onRegistrationCompleted(eventId, userId, registration.id)
+      .onRegistrationCompleted(eventId, userId, registration.id, {
+        beneficiaryType: 'SELF',
+      })
       .then(() => {});
 
+    await this.queueRegistrationConfirmationEmail(registration);
+
     return registration;
+  }
+
+  async recordSponsoredRegistration(
+    eventId: string,
+    sponsorUserId: string,
+    transactionId: string,
+    sponsorshipNote?: string | null,
+  ) {
+    const event = await this.prisma.event.findUnique({
+      where: { id: eventId },
+      select: {
+        id: true,
+        title: true,
+        creatorId: true,
+        thumbnailUrl: true,
+      },
+    });
+
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+
+    const sponsor = await this.prisma.user.findUnique({
+      where: { id: sponsorUserId },
+      select: {
+        username: true,
+        fullName: true,
+      },
+    });
+
+    const sponsorName = sponsor?.username || sponsor?.fullName || 'Someone';
+
+    this.notificationService
+      .createNotification({
+        recipientIds: [event.creatorId],
+        title: notificationConstants.EVENT_REGISTRATION_TITLE,
+        message: `${sponsorName} funded a registration spot for your event`,
+        type: notificationConstants.EVENT_REGISTRATION,
+        imageUrl: event.thumbnailUrl || '',
+        data: {
+          eventId: event.id,
+          transactionId,
+          beneficiaryType: 'SPONSORED',
+        },
+        link: '/event/' + event.id,
+      })
+      .then(() => {});
+
+    this.feedIntegrationService
+      .onRegistrationCompleted(eventId, sponsorUserId, null, {
+        beneficiaryType: 'SPONSORED',
+        sponsorshipNote: sponsorshipNote || null,
+      })
+      .then(() => {});
+
+    return {
+      eventId,
+      sponsorUserId,
+      transactionId,
+      sponsorshipNote: sponsorshipNote || null,
+    };
   }
 
   async getUserRegistrations(userId: string) {
@@ -116,11 +186,85 @@ export class RegistrationService {
             startDate: true,
             endDate: true,
             location: true,
+            registrationType: true,
+            isPhysicalEvent: true,
           },
         },
       },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  private async queueRegistrationConfirmationEmail(registration: {
+    id: string;
+    qrCode: string;
+    event: {
+      id: string;
+      title: string;
+      startDate: Date;
+      location?: string | null;
+    };
+    user: {
+      email: string | null;
+      username?: string | null;
+      fullName?: string | null;
+    };
+  }) {
+    if (!registration.user.email) {
+      return;
+    }
+
+    try {
+      const result = await this.mailService.sendRegistrationConfirmation({
+        to: registration.user.email,
+        name: this.resolveDisplayName(registration.user),
+        eventTitle: registration.event.title,
+        eventDate: registration.event.startDate.toLocaleDateString(),
+        venue: registration.event.location || 'Online',
+        registrationId: registration.id,
+        registrationType: 'Attendee',
+        confirmationCode: registration.id,
+        qrCode: registration.qrCode,
+        showQrCode: false,
+        profileUrl: this.buildFrontendUrl(`/event/${registration.event.id}`),
+      });
+
+      if (result.skipped) {
+        this.logger.warn(
+          `Skipped registration confirmation email for ${registration.user.email}: ${result.reason}`,
+        );
+      }
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : 'unknown mail error';
+      this.logger.warn(
+        `Failed to queue registration confirmation email for ${registration.user.email}: ${reason}`,
+      );
+    }
+  }
+
+  private buildFrontendUrl(path: string) {
+    const baseUrl = process.env.FRONTEND_URL?.trim();
+    if (!baseUrl) {
+      return undefined;
+    }
+
+    const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+    const normalizedPath = path.replace(/^\/+/, '');
+    return `${normalizedBaseUrl}/${normalizedPath}`;
+  }
+
+  private resolveDisplayName(user: {
+    email?: string | null;
+    username?: string | null;
+    fullName?: string | null;
+  }) {
+    const preferredName = user.fullName?.trim() || user.username?.trim();
+    if (preferredName) {
+      return preferredName;
+    }
+
+    return user.email?.split('@')[0]?.trim() || 'there';
   }
 
   async getEventRegistrations(eventId: string, userId?: string) {

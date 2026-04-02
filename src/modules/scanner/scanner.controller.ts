@@ -58,8 +58,8 @@ export class ScannerController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Bulk scan multiple QR codes' })
   @ApiBody({ type: BulkScanDto })
-  async bulkScan(@Body() bulkScanDto: BulkScanDto, @Request() req) {
-    return this.scannerService.bulkScan(bulkScanDto.scans, req.user.id);
+  async bulkScan(@Body() bulkScanDto: BulkScanDto,  @CurrentUser('id') userId: string,) {
+    return this.scannerService.bulkScan(bulkScanDto.scans, userId);
   }
 
   @Get('validate/:qrCode')
@@ -67,9 +67,9 @@ export class ScannerController {
   @ApiResponse({ status: 200, type: ValidationResultDto })
   async validate(
     @Param('qrCode') qrCode: string,
-    @Request() req,
+    @CurrentUser('id') userId: string,
   ): Promise<ValidationResultDto> {
-    return this.scannerService.validate(qrCode, req.user.id);
+    return this.scannerService.validate(qrCode, userId);
   }
 
   @Get('quick-scan')
@@ -79,15 +79,15 @@ export class ScannerController {
   @ApiResponse({ status: 200, type: QuickScanResultDto })
   async quickScan(
     @Query('qrCode') qrCode: string,
-    @Request() req,
+    @CurrentUser('id') userId: string,
   ): Promise<QuickScanResultDto> {
-    return this.scannerService.quickScan(qrCode, req.user.id);
+    return this.scannerService.quickScan(qrCode, userId);
   }
 
   @Get('history')
   @ApiOperation({ summary: 'Get scan history for current user' })
   async getScanHistory(
-    @Request() req,
+     @CurrentUser('id') userId: string,
     @Query('eventId') eventId?: string,
     @Query('type') type?: string,
     @Query('startDate') startDate?: string,
@@ -95,7 +95,7 @@ export class ScannerController {
     @Query('limit') limit?: string,
     @Query('page') page?: string,
   ) {
-    return this.scannerService.getScanHistory(req.user.id, {
+    return this.scannerService.getScanHistory(userId, {
       eventId,
       type,
       startDate: startDate ? new Date(startDate) : undefined,
@@ -107,7 +107,7 @@ export class ScannerController {
 
   @Get('stats')
   @ApiOperation({ summary: 'Get scanner statistics for current user' })
-  async getScannerStats(@Request() req, @Query('eventId') eventId?: string) {
-    return this.scannerService.getScannerStats(req.user.id, eventId);
+  async getScannerStats( @CurrentUser('id') userId: string, @Query('eventId') eventId?: string) {
+    return this.scannerService.getScannerStats(userId, eventId);
   }
 }

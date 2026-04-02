@@ -24,6 +24,12 @@ import { InitiateDonationDto } from './dto/initiate-donation.dto';
 import { Public } from 'src/common/decorators/public.decorator';
 import { RateLimit } from 'src/common/decorators/rate-limit.decorator';
 import { RateLimitGuard } from 'src/common/guards/rate-limit.guard';
+import {
+  PaymentClientContextDto,
+  PaymentProviderDto,
+} from './dto/payment-provider.dto';
+import { RiskReviewQueueQueryDto } from './dto/risk-review-queue.dto';
+import { ReviewTransactionRiskDto } from './dto/review-transaction-risk.dto';
 
 @Controller('transaction-reference')
 @ApiTags('Transaction References')
@@ -50,11 +56,25 @@ export class TransactionReferenceController {
     @CurrentUser('id') userId: string,
     @CurrentUser('email') email: string,
     @Query('eventid') reference: string,
+    @Query('beneficiaryType') beneficiaryType?: string,
+    @Query('sponsorshipNote') sponsorshipNote?: string,
+    @Query('provider') provider?: PaymentProviderDto,
+    @Query('deviceId') deviceId?: string,
+    @Query('platform') platform?: string,
   ) {
     return this.transactionReferenceService.initiateRegistration(
       userId,
       email,
       reference,
+      {
+        beneficiaryType,
+        sponsorshipNote,
+        provider,
+        clientContext: {
+          deviceId,
+          platform,
+        } as PaymentClientContextDto,
+      },
     );
   }
 
@@ -86,6 +106,53 @@ export class TransactionReferenceController {
       body,
       signature,
       req?.rawBody,
+    );
+  }
+
+  @Post('verify/alat')
+  @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ windowSec: 60, max: 120, cooldownSec: 60 })
+  @ApiOperation({ summary: 'Verify ALAT transfer collection' })
+  async verifyAlatTransaction(
+    @Headers('x-alat-signature') signature: string,
+    @Headers('x-ops-key') opsKey: string,
+    @Req() req: any,
+    @Body() body: any,
+  ) {
+    return this.transactionReferenceService.verifyAlatTransfer(
+      body,
+      signature,
+      req?.rawBody,
+      opsKey,
+    );
+  }
+
+  @Get('internal/risk-queue')
+  @Public()
+  @ApiOperation({ summary: 'Internal risk review queue endpoint' })
+  async getRiskReviewQueue(
+    @Headers('x-ops-key') opsKey: string,
+    @Query() dto: RiskReviewQueueQueryDto,
+  ) {
+    return {
+      data: await this.transactionReferenceService.getRiskReviewQueue(dto, opsKey),
+    };
+  }
+
+  @Post('internal/:id/risk-review')
+  @Public()
+  @ApiOperation({ summary: 'Internal transaction risk review endpoint' })
+  @ApiParam({ name: 'id', description: 'Transaction reference ID' })
+  async reviewTransactionRisk(
+    @Param('id') id: string,
+    @Headers('x-ops-key') opsKey: string,
+    @Body() dto: ReviewTransactionRiskDto,
+  ) {
+    return this.transactionReferenceService.reviewTransactionRisk(
+      id,
+      dto,
+      opsKey,
     );
   }
 

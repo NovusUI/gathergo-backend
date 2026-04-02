@@ -122,6 +122,8 @@ export class CarpoolController {
     @Param('carpoolId') carpoolId: string,
     @Body() joinRideDto: JoinCarpoolDto,
   ) {
+
+    console.log(joinRideDto,carpoolId,userId,username)
     return this.carpoolService.requestRide(
       userId,
       carpoolId,

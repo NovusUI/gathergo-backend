@@ -1,269 +1,269 @@
-// import {
-//     Controller,
-//     Get,
-//     Post,
-//     Body,
-//     Param,
-//     Query,
-//     UseGuards,
-//     ValidationPipe,
-//     Delete,
-//     Patch,
-//   } from '@nestjs/common';
-//   import {
-//     ApiBearerAuth,
-//     ApiOperation,
-//     ApiResponse,
-//     ApiTags,
-//     ApiQuery,
-//     ApiParam,
-//   } from '@nestjs/swagger';
-//   import { JwtAuthGuard } from 'src/common/guards/jwt-auth.guard';
-//   import { CurrentUser } from 'src/common/decorators/current-user.decorator';
-//   import { WalletService } from '../services/wallet.service';
-//   import {
-//     WalletResponseDto,
-//     WithdrawalRequestDto,
-//     WalletBalanceDto,
-//   } from '../dto/wallet.dto';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  Param,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiParam,
+  ApiTags,
+} from '@nestjs/swagger';
+import { CurrentUser } from 'src/common/decorators/current-user.decorator';
+import { Public } from 'src/common/decorators/public.decorator';
+import { JwtAuthGuard } from 'src/common/guards/jwt-auth.guard';
+import {
+  AccountChangesQueryDto,
+  CompleteSettlementDto,
+  CreateSettlementDto,
+  InternalAlatQueueQueryDto,
+  InternalKycQueueQueryDto,
+    PersonalLivenessDto,
+    NotifyOnKycResolutionDto,
+    ReviewKycDto,
+    ReviewPayoutProfileDto,
+    StartBusinessKycDto,
+    StartBusinessRepresentativeKycDto,
+    StartPersonalKycDto,
+  SubmitKycDto,
+  UpsertAlatProfileDto,
+  UpsertPayoutProfileDto,
+  WalletSettlementsQueryDto,
+  WalletTransactionsQueryDto,
+} from '../dto/wallet.dto';
+import { WalletService } from '../service/wallet.service';
 
-//   @ApiTags('Wallet')
-//   @Controller('wallet')
-//   @UseGuards(JwtAuthGuard)
-//   @ApiBearerAuth()
-//   export class WalletController {
-//     constructor(private readonly walletService: WalletService) {}
+@ApiTags('Wallet')
+@Controller('wallet')
+@UseGuards(JwtAuthGuard)
+@ApiBearerAuth()
+export class WalletController {
+  constructor(private readonly walletService: WalletService) {}
 
-//     @Get()
-//     @ApiOperation({ summary: 'Get wallet overview with balance, transactions, and payment methods' })
-//     @ApiResponse({
-//       status: 200,
-//       description: 'Returns wallet data',
-//       type: WalletResponseDto,
-//     })
-//     async getWallet(@CurrentUser('id') userId: string) {
-//       const data = await this.walletService.getWalletData(userId);
+  @Get('overview')
+  @ApiOperation({ summary: 'Get creator wallet overview' })
+  async getWalletOverview(@CurrentUser('id') userId: string) {
+    return this.walletService.getWalletOverview(userId);
+  }
 
-//       return {
-//         success: true,
-//         message: 'Wallet data retrieved successfully',
-//         ...data,
-//       };
-//     }
+  @Get('payout-profile')
+  @ApiOperation({ summary: 'Get creator payout profile' })
+  async getPayoutProfile(@CurrentUser('id') userId: string) {
+    return this.walletService.getPayoutProfile(userId);
+  }
 
-//     @Get('balance')
-//     @ApiOperation({ summary: 'Get wallet balance only' })
-//     @ApiResponse({
-//       status: 200,
-//       description: 'Returns wallet balance',
-//       type: WalletBalanceDto,
-//     })
-//     async getBalance(@CurrentUser('id') userId: string) {
-//       const data = await this.walletService.getWalletData(userId);
+  @Get('onboarding')
+  @ApiOperation({ summary: 'Get creator onboarding checklist state' })
+  async getOnboarding(@CurrentUser('id') userId: string) {
+    return this.walletService.getOnboarding(userId);
+  }
 
-//       return {
-//         success: true,
-//         message: 'Balance retrieved successfully',
-//         data: data.balance,
-//       };
-//     }
+  @Get('kyc')
+  @ApiOperation({ summary: 'Get creator KYC state' })
+  async getKyc(@CurrentUser('id') userId: string) {
+    return this.walletService.getKyc(userId);
+  }
 
-//     @Get('transactions')
-//     @ApiOperation({ summary: 'Get transaction history with pagination and filters' })
-//     @ApiQuery({
-//       name: 'page',
-//       required: false,
-//       type: Number,
-//       description: 'Page number (default: 1)',
-//     })
-//     @ApiQuery({
-//       name: 'limit',
-//       required: false,
-//       type: Number,
-//       description: 'Items per page (default: 20)',
-//     })
-//     @ApiQuery({
-//       name: 'type',
-//       required: false,
-//       enum: ['credit', 'debit'],
-//       description: 'Filter by transaction type',
-//     })
-//     @ApiQuery({
-//       name: 'status',
-//       required: false,
-//       enum: ['completed', 'pending', 'failed'],
-//       description: 'Filter by transaction status',
-//     })
-//     @ApiQuery({
-//       name: 'startDate',
-//       required: false,
-//       type: String,
-//       description: 'Start date for filtering (YYYY-MM-DD)',
-//     })
-//     @ApiQuery({
-//       name: 'endDate',
-//       required: false,
-//       type: String,
-//       description: 'End date for filtering (YYYY-MM-DD)',
-//     })
-//     async getTransactions(
-//       @CurrentUser('id') userId: string,
-//       @Query('page') page?: number,
-//       @Query('limit') limit?: number,
-//       @Query('type') type?: string,
-//       @Query('status') status?: string,
-//       @Query('startDate') startDate?: string,
-//       @Query('endDate') endDate?: string,
-//     ) {
-//       const result = await this.walletService.getTransactionHistory(
-//         userId,
-//         page || 1,
-//         limit || 20,
-//         { type, status, startDate, endDate }
-//       );
+  @Get('account-changes')
+  @ApiOperation({ summary: 'List settlement account change history' })
+  async getAccountChanges(
+    @CurrentUser('id') userId: string,
+    @Query() dto: AccountChangesQueryDto,
+  ) {
+    return this.walletService.getAccountChanges(userId, dto);
+  }
 
-//       return {
-//         success: true,
-//         message: 'Transactions retrieved successfully',
-//         ...result,
-//       };
-//     }
+  @Get('banks')
+  @ApiOperation({ summary: 'Get available payout banks from QoreID' })
+  async getBanks() {
+    return this.walletService.getBanks();
+  }
 
-//     @Post('withdraw')
-//     @ApiOperation({ summary: 'Request withdrawal from wallet' })
-//     @ApiResponse({
-//       status: 200,
-//       description: 'Withdrawal request submitted',
-//     })
-//     async requestWithdrawal(
-//       @CurrentUser('id') userId: string,
-//       @Body(new ValidationPipe()) dto: WithdrawalRequestDto,
-//     ) {
-//       return this.walletService.requestWithdrawal(userId, dto);
-//     }
+  @Get('alat-profile')
+  @ApiOperation({ summary: 'Get creator ALAT transfer profile' })
+  async getAlatProfile(@CurrentUser('id') userId: string) {
+    return this.walletService.getAlatProfile(userId);
+  }
 
-//     @Get('withdrawals')
-//     @ApiOperation({ summary: 'Get withdrawal history' })
-//     @ApiQuery({
-//       name: 'page',
-//       required: false,
-//       type: Number,
-//       description: 'Page number (default: 1)',
-//     })
-//     @ApiQuery({
-//       name: 'limit',
-//       required: false,
-//       type: Number,
-//       description: 'Items per page (default: 10)',
-//     })
-//     async getWithdrawalHistory(
-//       @CurrentUser('id') userId: string,
-//       @Query('page') page?: number,
-//       @Query('limit') limit?: number,
-//     ) {
-//       const result = await this.walletService.getWithdrawalHistory(
-//         userId,
-//         page || 1,
-//         limit || 10,
-//       );
+  @Post('payout-profile')
+  @ApiOperation({ summary: 'Create or update creator payout profile' })
+  async upsertPayoutProfile(
+    @CurrentUser('id') userId: string,
+    @Body() dto: UpsertPayoutProfileDto,
+  ) {
+    return this.walletService.upsertPayoutProfile(userId, dto);
+  }
 
-//       return {
-//         success: true,
-//         message: 'Withdrawal history retrieved successfully',
-//         ...result,
-//       };
-//     }
+  @Post('kyc/personal/start')
+  @ApiOperation({ summary: 'Start or update personal KYC draft' })
+  async startPersonalKyc(
+    @CurrentUser('id') userId: string,
+    @Body() dto: StartPersonalKycDto,
+  ) {
+    return this.walletService.startPersonalKyc(userId, dto);
+  }
 
-//     @Post('payment-methods')
-//     @ApiOperation({ summary: 'Add a new payment method' })
-//     async addPaymentMethod(
-//       @CurrentUser('id') userId: string,
-//       @Body() data: any,
-//     ) {
-//       return this.walletService.addPaymentMethod(userId, data);
-//     }
+  @Post('kyc/personal/liveness')
+  @ApiOperation({ summary: 'Save personal KYC liveness submission' })
+  async submitPersonalLiveness(
+    @CurrentUser('id') userId: string,
+    @Body() dto: PersonalLivenessDto,
+  ) {
+    return this.walletService.submitPersonalLiveness(userId, dto);
+  }
 
-//     @Patch('payment-methods/:id/default')
-//     @ApiOperation({ summary: 'Set payment method as default' })
-//     @ApiParam({
-//       name: 'id',
-//       description: 'Payment method ID',
-//       type: String,
-//     })
-//     async setDefaultPaymentMethod(
-//       @CurrentUser('id') userId: string,
-//       @Param('id') methodId: string,
-//     ) {
-//       return this.walletService.setDefaultPaymentMethod(userId, methodId);
-//     }
+  @Post('kyc/business/start')
+  @ApiOperation({ summary: 'Start or update business CAC verification draft' })
+  async startBusinessKyc(
+    @CurrentUser('id') userId: string,
+    @Body() dto: StartBusinessKycDto,
+  ) {
+    return this.walletService.startBusinessKyc(userId, dto);
+  }
 
-//     @Delete('payment-methods/:id')
-//     @ApiOperation({ summary: 'Remove a payment method' })
-//     @ApiParam({
-//       name: 'id',
-//       description: 'Payment method ID',
-//       type: String,
-//     })
-//     async removePaymentMethod(
-//       @CurrentUser('id') userId: string,
-//       @Param('id') methodId: string,
-//     ) {
-//       return this.walletService.removePaymentMethod(userId, methodId);
-//     }
+  @Post('kyc/business/representative')
+  @ApiOperation({ summary: 'Start or update business representative KYC draft' })
+  async startBusinessRepresentativeKyc(
+    @CurrentUser('id') userId: string,
+    @Body() dto: StartBusinessRepresentativeKycDto,
+  ) {
+    return this.walletService.startBusinessRepresentativeKyc(userId, dto);
+  }
 
-//     @Get('stats')
-//     @ApiOperation({ summary: 'Get wallet statistics' })
-//     async getWalletStats(@CurrentUser('id') userId: string) {
-//       // Get wallet data
-//       const walletData = await this.walletService.getWalletData(userId);
+  @Post('kyc/submit')
+  @ApiOperation({ summary: 'Submit KYC for review' })
+  async submitKyc(
+    @CurrentUser('id') userId: string,
+    @Body() dto: SubmitKycDto,
+  ) {
+    return this.walletService.submitKyc(userId, dto);
+  }
 
-//       // Calculate monthly stats
-//       const now = new Date();
-//       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  @Post('kyc/notify-on-resolution')
+  @ApiOperation({ summary: 'Notify creator when a pending provider verification resolves' })
+  async notifyOnKycResolution(
+    @CurrentUser('id') userId: string,
+    @Body() dto: NotifyOnKycResolutionDto,
+  ) {
+    return this.walletService.notifyOnKycResolution(userId, dto);
+  }
 
-//       const monthlyTransactions = await this.walletService.getTransactionHistory(
-//         userId,
-//         1,
-//         100, // Get all transactions for the month
-//         { startDate: startOfMonth.toISOString().split('T')[0] }
-//       );
+  @Get('transactions')
+  @ApiOperation({ summary: 'List creator wallet transactions' })
+  async getTransactions(
+    @CurrentUser('id') userId: string,
+    @Query() dto: WalletTransactionsQueryDto,
+  ) {
+    return this.walletService.getTransactionHistory(userId, dto);
+  }
 
-//       const monthlyIncome = monthlyTransactions.transactions
-//         .filter(t => t.type === 'credit' && t.status === 'completed')
-//         .reduce((sum, t) => sum + t.amount, 0);
+  @Get('settlements')
+  @ApiOperation({ summary: 'List creator settlements' })
+  async getSettlements(
+    @CurrentUser('id') userId: string,
+    @Query() dto: WalletSettlementsQueryDto,
+  ) {
+    return this.walletService.getSettlementHistory(userId, dto);
+  }
 
-//       const monthlyExpense = monthlyTransactions.transactions
-//         .filter(t => t.type === 'debit' && t.status === 'completed')
-//         .reduce((sum, t) => sum + t.amount, 0);
+  @Post('internal/payout-profile/:userId/review')
+  @Public()
+  @ApiOperation({ summary: 'Internal payout-profile review endpoint' })
+  @ApiParam({ name: 'userId', description: 'Creator user ID' })
+  async reviewPayoutProfile(
+    @Param('userId') userId: string,
+    @Headers('x-ops-key') opsKey: string,
+    @Body() dto: ReviewPayoutProfileDto,
+  ) {
+    return this.walletService.reviewPayoutProfile(userId, dto, opsKey);
+  }
 
-//       // Count transactions by event
-//       const eventStats: Record<string, number> = {};
-//       monthlyTransactions.transactions.forEach(t => {
-//         if (t.event) {
-//           eventStats[t.event] = (eventStats[t.event] || 0) + t.amount;
-//         }
-//       });
+  @Get('internal/kyc-queue')
+  @Public()
+  @ApiOperation({ summary: 'Internal KYC review queue endpoint' })
+  async getInternalKycQueue(
+    @Headers('x-ops-key') opsKey: string,
+    @Query() dto: InternalKycQueueQueryDto,
+  ) {
+    return {
+      data: await this.walletService.getInternalKycQueue(dto, opsKey),
+    };
+  }
 
-//       // Get top 3 events
-//       const topEvents = Object.entries(eventStats)
-//         .sort(([,a], [,b]) => b - a)
-//         .slice(0, 3)
-//         .map(([event, amount]) => ({ event, amount }));
+  @Get('internal/alat-queue')
+  @Public()
+  @ApiOperation({ summary: 'Internal ALAT setup queue endpoint' })
+  async getInternalAlatQueue(
+    @Headers('x-ops-key') opsKey: string,
+    @Query() dto: InternalAlatQueueQueryDto,
+  ) {
+    return {
+      data: await this.walletService.getInternalAlatQueue(dto, opsKey),
+    };
+  }
 
-//       return {
-//         success: true,
-//         message: 'Wallet statistics retrieved successfully',
-//         data: {
-//           balance: walletData.balance,
-//           monthly: {
-//             income: monthlyIncome,
-//             expense: monthlyExpense,
-//             net: monthlyIncome - monthlyExpense,
-//           },
-//           topEvents,
-//           transactionCount: monthlyTransactions.transactions.length,
-//           paymentMethodCount: walletData.paymentMethods.length,
-//         },
-//       };
-//     }
-//   }
+  @Post('internal/kyc/:userId/review')
+  @Public()
+  @ApiOperation({ summary: 'Internal KYC review endpoint' })
+  @ApiParam({ name: 'userId', description: 'Creator user ID' })
+  async reviewKyc(
+    @Param('userId') userId: string,
+    @Headers('x-ops-key') opsKey: string,
+    @Body() dto: ReviewKycDto,
+  ) {
+    return this.walletService.reviewKyc(userId, dto, opsKey);
+  }
+
+  @Post('webhooks/qoreid')
+  @Public()
+  @ApiOperation({ summary: 'Receive QoreID webhook callbacks' })
+  async handleQoreIdWebhook(
+    @Headers('x-verifyme-signature') signature: string,
+    @Req() req: any,
+    @Body() body: any,
+  ) {
+    return this.walletService.handleQoreIdWebhook(body, signature, req?.rawBody);
+  }
+
+  @Post('internal/alat-profile/:userId')
+  @Public()
+  @ApiOperation({ summary: 'Internal ALAT profile upsert endpoint' })
+  @ApiParam({ name: 'userId', description: 'Creator user ID' })
+  async upsertAlatProfile(
+    @Param('userId') userId: string,
+    @Headers('x-ops-key') opsKey: string,
+    @Body() dto: UpsertAlatProfileDto,
+  ) {
+    return this.walletService.upsertAlatProfile(userId, dto, opsKey);
+  }
+
+  @Post('internal/settlements/:creatorId')
+  @Public()
+  @ApiOperation({ summary: 'Internal settlement creation endpoint' })
+  @ApiParam({ name: 'creatorId', description: 'Creator user ID' })
+  async createSettlement(
+    @Param('creatorId') creatorId: string,
+    @Headers('x-ops-key') opsKey: string,
+    @Body() dto: CreateSettlementDto,
+  ) {
+    return this.walletService.createSettlement(creatorId, dto, opsKey);
+  }
+
+  @Post('internal/settlements/:settlementId/complete')
+  @Public()
+  @ApiOperation({ summary: 'Internal settlement completion endpoint' })
+  @ApiParam({ name: 'settlementId', description: 'Settlement record ID' })
+  async completeSettlement(
+    @Param('settlementId') settlementId: string,
+    @Headers('x-ops-key') opsKey: string,
+    @Body() dto: CompleteSettlementDto,
+  ) {
+    return this.walletService.completeSettlement(settlementId, dto, opsKey);
+  }
+}

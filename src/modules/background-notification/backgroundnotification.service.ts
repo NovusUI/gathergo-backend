@@ -35,7 +35,6 @@ export class NotificationsService {
       // Validate token based on type
       if (this.isExpoPushToken(token)) {
         // Expo tokens don't need Firebase validation
-        console.log(`Registering Expo push token for user ${userId}`);
       } else {
         // Validate FCM token with Firebase
         const { valid } = await this.firebaseService.validateTokens([token]);
@@ -45,8 +44,8 @@ export class NotificationsService {
         }
       }
 
-      // Remove existing tokens with the same value (avoid duplicates)
-      await this.removeTokenByValue(userId, token);
+      // Remove this device token everywhere first so it belongs to only one user.
+      await this.removeTokenByTokenValue(token);
 
       // Add new token
       const userToken: UserNotificationToken = {
@@ -261,7 +260,6 @@ export class NotificationsService {
     try {
       // Get all tokens for all users
       const allTokens = await this.getMultipleUserTokens(userIds);
-      console.log('partisipant id', userIds, allTokens);
 
       if (allTokens.length === 0) {
         this.logger.log('No valid FCM tokens found for notification');
@@ -270,7 +268,6 @@ export class NotificationsService {
 
       // Separate Expo and FCM tokens
       const { expoTokens, fcmTokens } = this.separateTokensByType(allTokens);
-      console.log(expoTokens, 'this is expo teken');
 
       // Send Expo notifications
       if (expoTokens.length > 0) {
@@ -512,7 +509,6 @@ export class NotificationsService {
   ): Promise<UserNotificationToken[]> {
     try {
       const data = await this.redisService.client.get(redisKey);
-      console.log(redisKey, data, 'this is token');
       if (!data) {
         return [];
       }
@@ -549,7 +545,6 @@ export class NotificationsService {
     tokens: UserNotificationToken[],
   ): Promise<void> {
     try {
-      console.log(redisKey, tokens, 'regiestering tokenssssss');
       await this.redisService.client.set(
         redisKey,
         JSON.stringify(tokens),

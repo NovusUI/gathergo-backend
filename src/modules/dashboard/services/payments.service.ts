@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { GetPaymentsDto } from '../dto/get-payments.dto';
+import { formatPayment } from 'src/utils';
 
 @Injectable()
 export class PaymentsService {
@@ -41,7 +42,9 @@ export class PaymentsService {
       take: pageSize,
     });
 
-    const formattedPayments = payments.map(this.formatPayment);
+    const formattedPayments = payments.map(formatPayment);
+
+    console.log(formattedPayments,"payable")
 
     return {
       data: formattedPayments,
@@ -52,20 +55,4 @@ export class PaymentsService {
     };
   }
 
-  private formatPayment(payment: any) {
-    return {
-      id: payment.id,
-      name: payment.user.username || 'Anonymous',
-      amount: payment.amount,
-      time: payment.createdAt.toLocaleTimeString('en-US', {
-        hour: '2-digit',
-        minute: '2-digit',
-      }),
-      date: payment.createdAt.toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-      }),
-      event: payment.event?.title || 'General Payment',
-    };
-  }
 }
