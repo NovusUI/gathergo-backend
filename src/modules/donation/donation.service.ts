@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 
 import { PrismaService } from 'src/prisma/prisma.service';
@@ -10,13 +11,17 @@ import { CreateDonationDto } from './dto/create-donation.dto';
 import { NotificationService } from '../notification/notification.service';
 import { notificationConstants } from 'src/common/constants';
 import { FeedIntegrationService } from '../feed/feed-integration.service';
+import { MailService } from '../mail/mail.service';
 
 @Injectable()
 export class DonationService {
+  private readonly logger = new Logger(DonationService.name);
+
   constructor(
-    private prisma: PrismaService,
-    private notificationService: NotificationService,
-    private feedIntegrationService: FeedIntegrationService,
+    private readonly prisma: PrismaService,
+    private readonly notificationService: NotificationService,
+    private readonly feedIntegrationService: FeedIntegrationService,
+    private readonly mailService: MailService,
   ) {}
 
   async createDonation(
@@ -41,12 +46,10 @@ export class DonationService {
       throw new BadRequestException('Event is not a donation event');
     }
 
-    // Note: The @Min(50000) decorator in DTO already validates minimum amount
+    // Note: The DTO validates the minimum amount in naira before payment
     // But we can double-check here for safety
-    if (amount < 500) {
-      throw new BadRequestException(
-        'Minimum donation amount is ₦50,000 (50000 kobo)',
-      );
+    if (amount < 50000) {
+      throw new BadRequestException('Minimum donation amount is ₦500');
     }
 
     // Create donation in transaction to update total
@@ -67,6 +70,8 @@ export class DonationService {
             select: {
               id: true,
               fullName: true,
+              username: true,
+              email: true,
               profilePicUrl: true,
             },
           },
@@ -87,7 +92,10 @@ export class DonationService {
       .createNotification({
         recipientIds: [event.creatorId],
         title: notificationConstants.EVENT_DONATION_TITLE,
-        message: notificationConstants.EVENT_DONATION_MESSAGE(username, amount),
+        message: notificationConstants.EVENT_DONATION_MESSAGE(
+          username,
+          amount / 100,
+        ),
         type: notificationConstants.EVENT_DONATION,
         imageUrl: event.thumbnailUrl || '',
         data: {
@@ -99,8 +107,17 @@ export class DonationService {
 
     // Generate feed for donation
     this.feedIntegrationService
-      .onDonationMade(eventId, userId, result.id, amount, isAnonymous)
+      .onDonationMade(
+        eventId,
+        userId,
+        result.id,
+        amount,
+        isAnonymous,
+        message,
+      )
       .then(() => {});
+
+    await this.queueDonationConfirmationEmail(result);
 
     return this.formatDonationResponse(result);
   }
@@ -160,5 +177,66 @@ export class DonationService {
             profilePicUrl: donation.user.profilePicUrl,
           },
     };
+  }
+
+  private async queueDonationConfirmationEmail(donation: {
+    id: string;
+    amount: number;
+    transactionId: string;
+    user: {
+      email?: string | null;
+      username?: string | null;
+      fullName?: string | null;
+    };
+    event: {
+      title: string;
+    };
+  }) {
+    if (!donation.user.email) {
+      return;
+    }
+
+    const transaction = await this.prisma.transactionReference.findUnique({
+      where: { id: donation.transactionId },
+      select: {
+        paymentProvider: true,
+      },
+    });
+
+    try {
+      const result = await this.mailService.sendDonationConfirmation({
+        to: donation.user.email,
+        name: this.resolveDisplayName(donation.user),
+        amount: donation.amount / 100,
+        currency: 'NGN',
+        campaignTitle: donation.event.title,
+        paymentMethod: transaction?.paymentProvider || 'Card',
+      });
+
+      if (result.skipped) {
+        this.logger.warn(
+          `Skipped donation confirmation email for ${donation.user.email}: ${result.reason}`,
+        );
+      }
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : 'unknown mail error';
+      this.logger.warn(
+        `Failed to queue donation confirmation email for ${donation.user.email}: ${reason}`,
+      );
+    }
+  }
+
+  private resolveDisplayName(user: {
+    email?: string | null;
+    username?: string | null;
+    fullName?: string | null;
+  }) {
+    const preferredName = user.fullName?.trim() || user.username?.trim();
+    if (preferredName) {
+      return preferredName;
+    }
+
+    return user.email?.split('@')[0]?.trim() || 'there';
   }
 }

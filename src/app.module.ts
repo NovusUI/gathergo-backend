@@ -15,7 +15,6 @@ import { SearchModule } from './modules/search/search.module';
 import { NotificationModule } from './modules/notification/notification.module';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaService } from './prisma/prisma.service';
-import * as Joi from 'joi';
 import { PrismaModule } from './prisma/prisma.module';
 import { UserPreferenceModule } from './modules/user-preference/user-preference.module';
 import { UserFollowModule } from './modules/user-follow/user-follow.module';
@@ -35,9 +34,16 @@ import { RegistrationModule } from './modules/registration/registration.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { ScannerModule } from './modules/scanner/scanner.modules';
 import { RateLimitGuard } from './common/guards/rate-limit.guard';
+import { WalletModule } from './modules/wallet/wallet.module';
+import { validateEnvironment } from './config/runtime-env';
 
 @Module({
   imports: [
+    ConfigModule.forRoot({
+      isGlobal: true, // <--- makes ConfigService available app-wide
+      validate: validateEnvironment,
+    }),
+    ScheduleModule.forRoot(),
     PrismaModule,
     AuthModule,
     UserModule,
@@ -68,13 +74,7 @@ import { RateLimitGuard } from './common/guards/rate-limit.guard';
     BackgroundNotificationsModule,
     RegistrationModule,
     ScannerModule,
-    ConfigModule.forRoot({
-      isGlobal: true, // <--- makes ConfigService available app-wide
-      validationSchema: Joi.object({
-        PORT: Joi.number().default(3000),
-      }),
-    }),
-    ScheduleModule.forRoot(),
+    WalletModule,
   ],
   controllers: [AppController],
   providers: [AppService, PrismaService, RateLimitGuard],

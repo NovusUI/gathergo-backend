@@ -1,0 +1,63 @@
+```mermaid
+flowchart TD
+  A["Initiation request arrives"] --> B{"Auth and validation pass?"}
+  B -- "No" --> X["Reject request"]
+  B -- "Yes" --> C{"Flow type?"}
+
+  C -- "Ticket" --> T["Load cart tickets"]
+  T --> T1{"Mixed-event cart?"}
+  T1 -- "Yes" --> X1["Reject: all tickets must belong to one event"]
+  T1 -- "No" --> T2{"At least one valid ticket left?"}
+  T2 -- "No" --> X2["Reject: no valid ticket was provided"]
+  T2 -- "Yes" --> G
+
+  C -- "Registration" --> R1{"Beneficiary type valid?"}
+  R1 -- "No" --> X3["Reject: invalid beneficiary type"]
+  R1 -- "Yes" --> R2{"Event exists?"}
+  R2 -- "No" --> X4["Reject: event not found"]
+  R2 -- "Yes" --> G
+
+  C -- "Donation" --> D1{"Event exists?"}
+  D1 -- "No" --> X4
+  D1 -- "Yes" --> D2{"Donation event?"}
+  D2 -- "No" --> X5["Reject: event is not a donation event"]
+  D2 -- "Yes" --> D3{"Amount >= ₦500?"}
+  D3 -- "No" --> X6["Reject: minimum donation is ₦500"]
+  D3 -- "Yes" --> G
+
+  G{"Gross amount > 0?"}
+  G -- "No" --> N["Skip risk assessment.<br/>No BLOCKED path here."]
+  G -- "Yes" --> RISK["Run assessRisk(...)"]
+
+  RISK --> Q1{"Buyer or creator missing?"}
+  Q1 -- "Yes" --> B1["BLOCKED<br/>missing_buyer_or_creator"]
+  Q1 -- "No" --> Q2["Accumulate score reasons:<br/>self-purchase +25<br/>large payment >= ₦100k +20<br/>new buyer +10<br/>new creator +15<br/>buyer velocity review >= 4/hr +25<br/>creator sales spike >= 30/day +15<br/>deviceId recorded only"]
+
+  Q2 --> Q3{"Buyer attempts on same event >= 8 in last hour?"}
+  Q3 -- "Yes" --> B2["BLOCKED<br/>buyer_velocity_block"]
+  Q3 -- "No" --> Q4{"Creator payout profile ACTIVE?"}
+
+  Q4 -- "No" --> Q5{"Existing unsettled exposure + this amount > ₦500k?"}
+  Q5 -- "Yes" --> B3["BLOCKED<br/>unverified_creator_exposure_cap"]
+  Q5 -- "No" --> H1["HOLD<br/>creator_kyc_pending"]
+
+  Q4 -- "Yes" --> Q6{"Risk score >= 60?"}
+  Q6 -- "Yes" --> H2["HOLD"]
+  Q6 -- "No" --> Q7{"Risk score >= 35?"}
+  Q7 -- "Yes" --> RV["REVIEW"]
+  Q7 -- "No" --> CL["CLEAR"]
+
+  B1 --> STOP["Initiation stops before transaction creation"]
+  B2 --> STOP
+  B3 --> STOP
+
+  N --> P{"Provider checks/init succeed?"}
+  H1 --> P
+  H2 --> P
+  RV --> P
+  CL --> P
+
+  P -- "No" --> X7["Initiation fails, but not as BLOCKED"]
+  P -- "Yes" --> OK["Transaction/initiation continues"]
+
+```

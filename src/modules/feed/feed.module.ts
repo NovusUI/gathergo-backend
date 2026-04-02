@@ -7,6 +7,7 @@ import { GuardsModule } from 'src/common/guards/guards.module';
 import { EventModule } from '../event/event.module';
 import { TicketModule } from '../ticket/ticket.module';
 import { DonationModule } from '../donation/donation.module';
+import { MailModule } from '../mail/mail.module';
 //import { RegistrationModule } from '../registration/registration.module';
 import { FeedIntegrationService } from './feed-integration.service';
 import { NotificationService } from '../notification/notification.service';
@@ -19,6 +20,7 @@ import { NotificationsService } from '../background-notification/backgroundnotif
     forwardRef(() => EventModule),
     forwardRef(() => TicketModule),
     forwardRef(() => DonationModule),
+    MailModule,
     //forwardRef(() => RegistrationModule),
   ],
   controllers: [FeedController],

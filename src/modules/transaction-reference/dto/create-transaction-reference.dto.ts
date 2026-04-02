@@ -1,7 +1,12 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsArray, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { IsUUID, IsInt, Min,IsString } from 'class-validator';
+import {
+  PaymentClientContextDto,
+  PaymentProviderDto,
+} from './payment-provider.dto';
+import { IsEnum, IsOptional } from 'class-validator';
 
 export class TransactionTicketItemDto {
   @ApiProperty({ example: 'uuid-of-ticket-type' })
@@ -27,4 +32,18 @@ export class CreateTransactionReferenceDto {
   @ValidateNested({ each: true })
   @Type(() => TransactionTicketItemDto)
   items: TransactionTicketItemDto[];
+
+  @ApiPropertyOptional({
+    enum: PaymentProviderDto,
+    default: PaymentProviderDto.PAYSTACK,
+  })
+  @IsOptional()
+  @IsEnum(PaymentProviderDto)
+  provider?: PaymentProviderDto = PaymentProviderDto.PAYSTACK;
+
+  @ApiPropertyOptional({ type: PaymentClientContextDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => PaymentClientContextDto)
+  clientContext?: PaymentClientContextDto;
 }

@@ -14,7 +14,7 @@ import {
   EventCarpoolFilter,
   EventCarpoolQueryDto,
 } from './dto/event-carpool-query.dto';
-import { startOfToday } from 'date-fns';
+import { isSameDay, startOfToday } from 'date-fns';
 import { getRandomNote } from 'src/utils';
 import { JoinCarpoolDto } from './dto/join-carpool.dto';
 import { MessageService } from '../message/message.service';
@@ -57,6 +57,7 @@ interface RankedCarpoolRow {
   availableSeats: number;
   pricePerSeat: number;
   description: string | null;
+  vehicleIcon: string | null;
   note: string | null;
   status: string;
   expiresAt: Date;
@@ -71,6 +72,29 @@ interface RankedCarpoolRow {
   distanceKm: number | null;
 }
 
+type EditableCarpoolField =
+  | 'origin'
+  | 'destination'
+  | 'departureTime'
+  | 'note'
+  | 'description'
+  | 'vehicleIcon';
+
+type CarpoolFieldChange = {
+  field: EditableCarpoolField;
+  oldValue: string | null;
+  newValue: string | null;
+};
+
+type EditableCarpoolUpdatePayload = {
+  origin?: string;
+  destination?: string | null;
+  departureTime?: string;
+  note?: string | null;
+  description?: string | null;
+  vehicleIcon?: string;
+};
+
 @Injectable()
 export class CarpoolService {
   constructor(
@@ -82,17 +106,27 @@ export class CarpoolService {
   ) {}
 
   async create(userId: string, data: CreateCarpoolDto) {
-    let event: { endDate: Date } | null = null;
+    let event: {
+      startDate: Date;
+      endDate: Date;
+      isPhysicalEvent: boolean;
+    } | null = null;
     // Check if driver already has a carpool for the same event
     if (data.eventId) {
       // Load and validate event
       event = await this.prisma.event.findUnique({
         where: { id: data.eventId },
-        select: { endDate: true },
+        select: { startDate: true, endDate: true, isPhysicalEvent: true },
       });
 
       if (!event) {
         throw new BadRequestException('Event not found');
+      }
+
+      if (!event.isPhysicalEvent) {
+        throw new BadRequestException(
+          'Carpool is only available for physical events',
+        );
       }
 
       const now = new Date();
@@ -127,12 +161,30 @@ export class CarpoolService {
     }
 
     // Check for overlapping departure time
-    const overlapping = await this.prisma.carpool.findFirst({
+    const currentEventDate = event?.startDate ?? null;
+    const sameTimeCarpools = await this.prisma.carpool.findMany({
       where: {
         driverId: userId,
         departureTime: data.departureTime,
         isDeleted: false,
       },
+      select: {
+        id: true,
+        event: {
+          select: {
+            startDate: true,
+          },
+        },
+      },
+    });
+    const overlapping = sameTimeCarpools.find((carpool) => {
+      const existingEventDate = carpool.event?.startDate ?? null;
+
+      if (existingEventDate && currentEventDate) {
+        return isSameDay(existingEventDate, currentEventDate);
+      }
+
+      return !existingEventDate && !currentEventDate;
     });
 
     if (overlapping) {
@@ -142,7 +194,7 @@ export class CarpoolService {
     }
 
     // Cancel conflicting passenger requests (same time)
-    const conflictingPassengerTime =
+    const sameTimePassengerRequests =
       await this.prisma.carpoolPassenger.findMany({
         where: {
           userId,
@@ -152,7 +204,31 @@ export class CarpoolService {
             isDeleted: false,
           },
         },
+        select: {
+          id: true,
+          carpool: {
+            select: {
+              event: {
+                select: {
+                  startDate: true,
+                },
+              },
+            },
+          },
+        },
       });
+
+    const conflictingPassengerTime = sameTimePassengerRequests.filter(
+      (request) => {
+        const passengerEventDate = request.carpool.event?.startDate ?? null;
+
+        if (passengerEventDate && currentEventDate) {
+          return isSameDay(passengerEventDate, currentEventDate);
+        }
+
+        return !passengerEventDate && !currentEventDate;
+      },
+    );
 
     for (const p of conflictingPassengerTime) {
       await this.prisma.carpoolPassenger.update({
@@ -204,6 +280,7 @@ export class CarpoolService {
       data.departureTime,
       data.description ?? null,
       data.note || getRandomNote(),
+      data.vehicleIcon ?? null,
       expiresAt,
     ];
 
@@ -229,12 +306,12 @@ export class CarpoolService {
       `
       INSERT INTO "Carpool" (
         "id", "driverId", "eventId", "origin", "destination",
-        "departureTime", "description", "note", "status", "isDeleted", "expiresAt",
+        "departureTime", "description", "note", "vehicleIcon", "status", "isDeleted", "expiresAt",
         "startPoint", "endPoint", "createdAt", "updatedAt"
       ) VALUES (
         gen_random_uuid(),
-        $1, $2, $3, $4, $5, $6, $7,
-        'ACTIVE', false, $8,
+        $1, $2, $3, $4, $5, $6, $7, $8,
+        'ACTIVE', false, $9,
         ${startPointSQL},
         ${endPointSQL},
         now(), now()
@@ -248,6 +325,7 @@ export class CarpoolService {
       "departureTime",
       "description",
       "note",
+      "vehicleIcon",
       "status",
       "isDeleted",
       "expiresAt",
@@ -356,12 +434,33 @@ export class CarpoolService {
   }
 
   async update(userId: string, id: string, data: UpdateCarpoolDto) {
-    // Check if the carpool exists and belongs to the user
     const carpool = await this.prisma.carpool.findUnique({
       where: { id },
+      include: {
+        driver: {
+          select: {
+            id: true,
+            username: true,
+          },
+        },
+        event: {
+          select: {
+            id: true,
+            title: true,
+            startDate: true,
+            imageUrl: true,
+          },
+        },
+        passengers: {
+          where: { status: 'ACCEPTED' },
+          select: {
+            userId: true,
+          },
+        },
+      },
     });
 
-    if (!carpool) {
+    if (!carpool || carpool.isDeleted) {
       throw new NotFoundException('Carpool not found');
     }
 
@@ -371,10 +470,90 @@ export class CarpoolService {
       );
     }
 
-    return this.prisma.carpool.update({
+    if (carpool.status !== 'ACTIVE' || new Date() > carpool.expiresAt) {
+      throw new BadRequestException('You can no longer update this carpool');
+    }
+
+    const updatePayload = this.sanitizeCarpoolUpdatePayload(data);
+
+    if (Object.keys(updatePayload).length === 0) {
+      throw new BadRequestException(
+        'No editable ride details were provided for update',
+      );
+    }
+
+    if (
+      updatePayload.departureTime &&
+      updatePayload.departureTime !== carpool.departureTime
+    ) {
+      await this.ensureNoDepartureTimeConflict(
+        userId,
+        id,
+        updatePayload.departureTime,
+        carpool.event?.startDate ?? null,
+      );
+    }
+
+    const changes = this.getCarpoolFieldChanges(carpool, updatePayload);
+
+    if (changes.length === 0) {
+      return carpool;
+    }
+
+    const updatedCarpool = await this.prisma.carpool.update({
       where: { id },
-      data,
+      data: updatePayload,
     });
+
+    const messageRelevantFields = new Set<EditableCarpoolField>([
+      'origin',
+      'destination',
+      'departureTime',
+      'note',
+    ]);
+
+    const messageRelevantChanges = changes.filter((change) =>
+      messageRelevantFields.has(change.field),
+    );
+
+    if (messageRelevantChanges.length > 0) {
+      const content = this.buildRideUpdateMessage(
+        carpool.driver.username || 'Driver',
+        messageRelevantChanges,
+      );
+
+      await this.messageService.createMessage(userId, id, {
+        content,
+        tempId: `ride-update-${id}-${Date.now()}`,
+      });
+
+      const recipientIds = carpool.passengers
+        .map((passenger) => passenger.userId)
+        .filter((recipientId) => recipientId !== userId);
+
+      if (recipientIds.length > 0) {
+        await this.notificationService.createNotification({
+          recipientIds,
+          title: 'Ride details updated',
+          message: content,
+          type: 'carpool_update',
+          imageUrl: carpool.event?.imageUrl ?? '',
+          link: '/chat/' + id,
+          data: {
+            carpoolId: id,
+          },
+        });
+      }
+    }
+
+    await this.pubsubService.publishCarpoolUpdate(
+      'carpool_updated',
+      id,
+      this.buildCarpoolUpdateRealtimePayload(changes),
+      userId,
+    );
+
+    return updatedCarpool;
   }
 
   async remove(userId: string, id: string) {
@@ -937,6 +1116,182 @@ export class CarpoolService {
     };
   }
 
+  private sanitizeCarpoolUpdatePayload(data: UpdateCarpoolDto) {
+    const payload: EditableCarpoolUpdatePayload = {};
+
+    if (typeof data.origin === 'string') {
+      const origin = data.origin.trim();
+      if (!origin) {
+        throw new BadRequestException('Pickup location cannot be empty');
+      }
+      payload.origin = origin;
+    }
+
+    if (typeof data.destination === 'string') {
+      const destination = data.destination.trim();
+      payload.destination = destination || null;
+    }
+
+    if (typeof data.departureTime === 'string') {
+      const departureTime = data.departureTime.trim();
+      if (!departureTime) {
+        throw new BadRequestException('Departure time cannot be empty');
+      }
+      payload.departureTime = departureTime;
+    }
+
+    if (typeof data.note === 'string') {
+      payload.note = data.note.trim() || null;
+    }
+
+    if (typeof data.description === 'string') {
+      payload.description = data.description.trim() || null;
+    }
+
+    if (typeof data.vehicleIcon === 'string') {
+      payload.vehicleIcon = data.vehicleIcon;
+    }
+
+    return payload;
+  }
+
+  private async ensureNoDepartureTimeConflict(
+    userId: string,
+    carpoolId: string,
+    departureTime: string,
+    currentEventDate: Date | null,
+  ) {
+    const sameTimeCarpools = await this.prisma.carpool.findMany({
+      where: {
+        driverId: userId,
+        departureTime,
+        isDeleted: false,
+        NOT: {
+          id: carpoolId,
+        },
+      },
+      select: {
+        id: true,
+        event: {
+          select: {
+            startDate: true,
+          },
+        },
+      },
+    });
+
+    const overlapping = sameTimeCarpools.find((candidate) => {
+      const candidateEventDate = candidate.event?.startDate ?? null;
+
+      if (candidateEventDate && currentEventDate) {
+        return isSameDay(candidateEventDate, currentEventDate);
+      }
+
+      return !candidateEventDate && !currentEventDate;
+    });
+
+    if (overlapping) {
+      throw new BadRequestException(
+        'You already have a carpool at this departure time',
+      );
+    }
+  }
+
+  private getCarpoolFieldChanges(
+    currentCarpool: {
+      origin: string;
+      destination: string | null;
+      departureTime: string;
+      note: string | null;
+      description: string | null;
+      vehicleIcon: string | null;
+    },
+    updatePayload: EditableCarpoolUpdatePayload,
+  ): CarpoolFieldChange[] {
+    const editableFields: EditableCarpoolField[] = [
+      'origin',
+      'destination',
+      'departureTime',
+      'note',
+      'description',
+      'vehicleIcon',
+    ];
+
+    return editableFields
+      .filter((field) => field in updatePayload)
+      .map((field) => {
+        const oldValue = currentCarpool[field] ?? null;
+        const newValue = updatePayload[field] ?? null;
+
+        return {
+          field,
+          oldValue,
+          newValue,
+        };
+      })
+      .filter((change) => change.oldValue !== change.newValue);
+  }
+
+  private buildRideUpdateMessage(
+    driverName: string,
+    changes: CarpoolFieldChange[],
+  ) {
+    const summaries = changes.map((change) =>
+      this.describeCarpoolChangeForMessage(change),
+    );
+
+    return `Ride update from @${driverName}: ${summaries.join(', ')}.`;
+  }
+
+  private describeCarpoolChangeForMessage(change: CarpoolFieldChange) {
+    switch (change.field) {
+      case 'origin':
+        return `pickup is now ${change.newValue}`;
+      case 'destination':
+        return change.newValue
+          ? `drop-off is now ${change.newValue}`
+          : 'drop-off details were cleared';
+      case 'departureTime':
+        return `departure moved to ${this.formatCarpoolTime(change.newValue)}`;
+      case 'note':
+        return change.newValue ? 'ride note was updated' : 'ride note was cleared';
+      case 'description':
+        return change.newValue
+          ? 'ride description was updated'
+          : 'ride description was cleared';
+      case 'vehicleIcon':
+        return 'ride vibe was updated';
+      default:
+        return 'ride details changed';
+    }
+  }
+
+  private buildCarpoolUpdateRealtimePayload(changes: CarpoolFieldChange[]) {
+    return changes.reduce<Record<string, string | null>>((acc, change) => {
+      acc[change.field] = change.newValue;
+      return acc;
+    }, {});
+  }
+
+  private formatCarpoolTime(time: string | null) {
+    if (!time) {
+      return 'a new time';
+    }
+
+    const [hourPart = '0', minutePart = '00'] = time.split(':');
+    const hours = Number.parseInt(hourPart, 10);
+    const minutes = minutePart.padStart(2, '0');
+
+    if (Number.isNaN(hours)) {
+      return time;
+    }
+
+    const suffix = hours >= 12 ? 'pm' : 'am';
+    const hour12 = hours % 12 || 12;
+
+    return `${hour12}:${minutes} ${suffix}`;
+  }
+
   async getPaginatedEventCarpools(
     userId: string,
     eventId: string,
@@ -1039,6 +1394,7 @@ export class CarpoolService {
         c."availableSeats",
         c."pricePerSeat",
         c.description,
+        c."vehicleIcon",
         c.note,
         c.status,
         c."expiresAt",
@@ -1134,6 +1490,7 @@ export class CarpoolService {
         seatsLeft: Math.max(0, row.availableSeats - row.acceptedPassengers),
         pricePerSeat: row.pricePerSeat,
         description: row.description,
+        vehicleIcon: row.vehicleIcon,
         note: row.note,
         status: row.status,
         expiresAt: row.expiresAt,

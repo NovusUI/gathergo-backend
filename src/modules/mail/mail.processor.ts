@@ -1,332 +1,281 @@
+import { Injectable, Logger } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
- import { Resend } from 'resend';
- import { ConfigService } from '@nestjs/config';
- import { GithubTemplateService } from './github-template.service';
-import { Injectable, Logger } from '@nestjs/common';
+import { MailDeliveryService } from './mail-delivery.service';
+import { MailSettingsService } from './mail-settings.service';
+import {
+  MailFeature,
+  MailTemplateVariables,
+} from './mail.types';
 
 @Processor('mailQueue')
 @Injectable()
 export class MailProcessor extends WorkerHost {
-  private resend: Resend;
   private readonly logger = new Logger(MailProcessor.name);
 
   constructor(
-    private configService: ConfigService,
-    private githubTemplateService: GithubTemplateService
+    private readonly mailDeliveryService: MailDeliveryService,
+    private readonly mailSettingsService: MailSettingsService,
   ) {
     super();
-    const apiKey = this.configService.get<string>('resend.apiKey');
-    if (!apiKey) {
-      throw new Error('RESEND_API_KEY is not configured');
-    }
-    this.resend = new Resend(apiKey);
   }
 
   async process(job: Job) {
-    const { name, data } = job;
+    const feature = this.resolveFeature(job.name, job.data);
+    const templateKey = String(job.data?.templateKey || feature);
+    const state = this.mailSettingsService.explainFeatureState(
+      feature,
+      templateKey,
+    );
+
+    if (!state.enabled) {
+      this.logger.log(
+        `Skipping queued email job ${job.id} for ${feature}: ${state.reason}`,
+      );
+      return;
+    }
+
+    const templateId = this.mailSettingsService.getTemplateId(templateKey);
+    if (!templateId) {
+      this.logger.warn(
+        `Skipping queued email job ${job.id} for ${feature}: template ${templateKey} is not configured`,
+      );
+      return;
+    }
+ 
+    console.log("first leg")
 
     try {
-      switch (name) {
-        case 'ticketConfirmation':
-          await this.processTicketConfirmation(data);
-          break;
-        case 'donationConfirmation':
-          await this.processDonationConfirmation(data);
-          break;
-        case 'registrationConfirmation':
-          await this.processRegistrationConfirmation(data);
-          break;
-        case 'donationTargetReached':
-          await this.processDonationTargetReached(data);
-          break;
-        case 'welcomeEmail':
-          await this.processWelcomeEmail(data);
-          break;
-        case 'customEmail':
-          await this.processCustomEmail(data);
-          break;
-        default:
-          this.logger.warn(`Unknown job type: ${name}`);
-      }
+      await this.mailDeliveryService.sendTemplate(feature, {
+        to: this.asRecipients(job.data.to),
+        templateId,
+        variables: await this.buildVariables(job.name, job.data),
+        subject: job.data.subject,
+        cc: this.asOptionalRecipients(job.data.cc),
+        bcc: this.asOptionalRecipients(job.data.bcc),
+        replyTo: job.data.replyTo,
+        attachments: job.data.attachments,
+      });
     } catch (error) {
-      this.logger.error(`Failed to process job ${job.id}:`, error);
-      // You might want to implement retry logic here
+      this.logger.error(`Failed to process mail job ${job.id}:`, error);
       throw error;
     }
   }
 
-  private async processTicketConfirmation(data: any) {
-    const {
-      to,
-      name,
-      eventTitle,
-      eventDate,
-      venue,
-      ticketId,
-      ticketType,
-      price,
-      quantity,
-      eventImage,
-      qrCode,
-      cc,
-      bcc,
-      replyTo,
-      subject,
-    } = data;
-
-    const html = await this.githubTemplateService.getTemplate('ticket-confirmation', {
-      name,
-      eventTitle,
-      eventDate: eventDate || 'TBD',
-      venue: venue || 'Online',
-      ticketId: ticketId || 'N/A',
-      ticketType: ticketType || 'General Admission',
-      price: price ? `$${price.toFixed(2)}` : 'Free',
-      quantity: quantity || 1,
-      totalAmount: price && quantity ? `$${(price * quantity).toFixed(2)}` : 'Free',
-      eventImage: eventImage || '',
-      qrCode: qrCode || '',
+  private async buildVariables(
+    jobName: string,
+    data: any,
+  ): Promise<MailTemplateVariables> {
+    const baseVariables = {
       year: new Date().getFullYear(),
       currentDate: new Date().toLocaleDateString(),
-    });
+    };
 
-    await this.resend.emails.send({
-      from: this.configService.get<string>('resend.defaultFrom'),
-      to: Array.isArray(to) ? to : [to],
-      subject: subject || `Your Ticket Confirmation: ${eventTitle}`,
-   
-      cc: cc ? (Array.isArray(cc) ? cc : [cc]) : undefined,
-      bcc: bcc ? (Array.isArray(bcc) ? bcc : [bcc]) : undefined,
-      replyTo,
-      template: {id:"",variables:JSON.parse(html)}
-    });
+    switch (jobName) {
+      case 'emailVerificationCode':
+        return {
+          ...baseVariables,
+          name: data.name,
+          code: data.code,
+          expiresInMinutes: data.expiresInMinutes ?? 10,
+        };
 
-    this.logger.log(`Ticket confirmation email sent to ${to}`);
+      case 'passwordResetCode':
+        return {
+          ...baseVariables,
+          name: data.name,
+          code: data.code,
+          expiresInMinutes: data.expiresInMinutes ?? 10,
+        };
+
+      case 'ticketConfirmation':
+        return {
+          ...baseVariables,
+          name: data.name,
+          eventTitle: data.eventTitle,
+          eventDate: data.eventDate || 'TBD',
+          venue: data.venue || 'Online',
+          ticketId: data.ticketId || 'N/A',
+          ticketType: data.ticketType || 'General Admission',
+          price: data.price ?? 0,
+          quantity: data.quantity || 1,
+          totalAmount:
+            typeof data.price === 'number' && typeof data.quantity === 'number'
+              ? data.price * data.quantity
+              : data.price ?? 0,
+          eventImage: data.eventImage || '',
+          qrCode: data.qrCode || '',
+          qrCodeImageUrl: this.buildQrCodeImageUrl(data.qrCode),
+          qrCodeSectionStyle: data.qrCode ? 'display:block;' : 'display:none;',
+        };
+
+      case 'donationConfirmation':
+        return {
+          ...baseVariables,
+          name: data.name,
+          amount: data.amount,
+          currency: data.currency || 'USD',
+          donationId: data.donationId || 'N/A',
+          campaignTitle: data.campaignTitle || 'General Fund',
+          campaignId: data.campaignId || '',
+          paymentMethod: data.paymentMethod || 'Card',
+          isRecurring: data.isRecurring ? 1 : 0,
+          recurrence: data.recurrence || 'Monthly',
+          taxReceipt: data.taxReceipt ? 1 : 0,
+          transactionTime: new Date().toLocaleTimeString(),
+          receiptNumber: data.donationId
+            ? `REC-${data.donationId}`
+            : `REC-${Date.now()}`,
+        };
+
+      case 'registrationConfirmation':
+        return {
+          ...baseVariables,
+          name: data.name,
+          eventTitle: data.eventTitle || 'Event Registration',
+          eventDate: data.eventDate || 'TBD',
+          venue: data.venue || 'Online',
+          registrationId: data.registrationId || 'N/A',
+          registrationType: data.registrationType || 'Attendee',
+          confirmationCode: data.confirmationCode || 'N/A',
+          qrCode: data.qrCode || '',
+          qrCodeImageUrl: this.buildQrCodeImageUrl(data.qrCode),
+          qrCodeSectionStyle:
+            data.showQrCode && data.qrCode ? 'display:block;' : 'display:none;',
+          loginUrl: data.loginUrl || '#',
+          profileUrl: data.profileUrl || '#',
+          registrationDate: new Date().toLocaleDateString(),
+        };
+
+      case 'donationTargetReached':
+        return {
+          ...baseVariables,
+          campaignTitle: data.campaignTitle,
+          targetAmount: data.targetAmount,
+          currentAmount: data.currentAmount,
+          donorsCount: data.donorsCount,
+          campaignUrl: data.campaignUrl || '#',
+          campaignImage: data.campaignImage || '',
+          organizerName: data.organizerName || 'The Campaign Team',
+          percentage: this.calculatePercentage(
+            data.currentAmount,
+            data.targetAmount,
+          ),
+          achievementDate: new Date().toLocaleDateString(),
+          overfundedAmount:
+            data.currentAmount > data.targetAmount
+              ? data.currentAmount - data.targetAmount
+              : 0,
+        };
+
+      case 'impactMap':
+        return {
+          ...baseVariables,
+          name: data.name || 'there',
+          eventTitle: data.eventTitle || 'Your GatherGo campaign',
+          organizerName: data.organizerName || 'the GatherGo community',
+          eventEndDate: data.eventEndDate || baseVariables.currentDate,
+          donationTarget: this.formatCurrency(data.donationTarget ?? 0),
+          amountRaised: this.formatCurrency(data.amountRaised ?? 0),
+          supportersCount: data.supportersCount ?? 0,
+          impactTitle: data.impactTitle || 'your chosen cause',
+          impactDescription:
+            data.impactDescription ||
+            'This campaign gives back directly to a real-world cause.',
+          impactPercentage: data.impactPercentage ?? 100,
+          campaignUrl: data.campaignUrl || '#',
+          campaignImage: data.campaignImage || '',
+        };
+
+      case 'welcomeEmail':
+        return {
+          ...baseVariables,
+          name: data.name,
+          activationLink: data.activationLink || '#',
+          loginLink: data.loginLink || '#',
+          profileSetupLink: data.profileSetupLink || '#',
+          signupDate: new Date().toLocaleDateString(),
+        };
+
+      default:
+        return {
+          ...baseVariables,
+          ...this.normalizeCustomVariables(data.variables || {}),
+        };
+    }
   }
 
-  private async processDonationConfirmation(data: any) {
-    const {
-      to,
-      name,
-      amount,
-      currency = 'USD',
-      donationId,
-      campaignTitle,
-      campaignId,
-      paymentMethod,
-      isRecurring = false,
-      recurrence,
-      taxReceipt = false,
-      cc,
-      bcc,
-      replyTo,
-      subject,
-    } = data;
-
-    const formattedAmount = new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: currency,
-    }).format(amount);
-
-    const html = await this.githubTemplateService.getTemplate('donation-confirmation', {
-      name,
-      amount: formattedAmount,
-      rawAmount: amount,
-      currency,
-      donationId: donationId || 'N/A',
-      campaignTitle: campaignTitle || 'General Fund',
-      campaignId: campaignId || '',
-      paymentMethod: paymentMethod || 'Credit Card',
-      isRecurring,
-      recurrence: recurrence || 'Monthly',
-      taxReceipt,
-      transactionDate: new Date().toLocaleDateString(),
-      transactionTime: new Date().toLocaleTimeString(),
-      year: new Date().getFullYear(),
-      // Generate receipt number if not provided
-      receiptNumber: donationId ? `REC-${donationId}` : `REC-${Date.now()}`,
-    });
-
-    await this.resend.emails.send({
-      from: this.configService.get<string>('resend.defaultFrom'),
-      to: Array.isArray(to) ? to : [to],
-      subject: subject || `Donation Confirmation - Thank You!`,
-        template: {id:"",variables:JSON.parse(html)},
-      cc: cc ? (Array.isArray(cc) ? cc : [cc]) : undefined,
-      bcc: bcc ? (Array.isArray(bcc) ? bcc : [bcc]) : undefined,
-      replyTo,
-    });
-
-    this.logger.log(`Donation confirmation email sent to ${to}`);
+  private normalizeCustomVariables(
+    variables: Record<string, any>,
+  ): MailTemplateVariables {
+    return Object.fromEntries(
+      Object.entries(variables).map(([key, value]) => [
+        key,
+        typeof value === 'number' ? value : String(value ?? ''),
+      ]),
+    );
   }
 
-  private async processRegistrationConfirmation(data: any) {
-    const {
-      to,
-      name,
-      eventTitle,
-      eventDate,
-      venue,
-      registrationId,
-      registrationType,
-      confirmationCode,
-      loginUrl,
-      profileUrl,
-      cc,
-      bcc,
-      replyTo,
-      subject,
-    } = data;
+  private calculatePercentage(currentAmount: number, targetAmount: number) {
+    if (!targetAmount) {
+      return 0;
+    }
 
-    const html = await this.githubTemplateService.getTemplate('registration-confirmation', {
-      name,
-      eventTitle: eventTitle || 'Event Registration',
-      eventDate: eventDate || 'TBD',
-      venue: venue || 'Online',
-      registrationId: registrationId || 'N/A',
-      registrationType: registrationType || 'Attendee',
-      confirmationCode: confirmationCode || 'N/A',
-      loginUrl: loginUrl || '#',
-      profileUrl: profileUrl || '#',
-      registrationDate: new Date().toLocaleDateString(),
-      year: new Date().getFullYear(),
-      supportEmail: 'support@example.com',
-      eventManager: 'events@example.com',
-    });
-
-    await this.resend.emails.send({
-      from: this.configService.get<string>('resend.defaultFrom'),
-      to: Array.isArray(to) ? to : [to],
-      subject: subject || 'Registration Confirmation',
-      template: {id:"",variables:JSON.parse(html)},
-      cc: cc ? (Array.isArray(cc) ? cc : [cc]) : undefined,
-      bcc: bcc ? (Array.isArray(bcc) ? bcc : [bcc]) : undefined,
-      replyTo,
-    });
-
-    this.logger.log(`Registration confirmation email sent to ${to}`);
+    return Math.min(100, Math.round((currentAmount / targetAmount) * 100));
   }
 
-  private async processDonationTargetReached(data: any) {
-    const {
-      to,
-      campaignTitle,
-      targetAmount,
-      currentAmount,
-      donorsCount,
-      campaignUrl,
-      campaignImage,
-      organizerName,
-      cc,
-      bcc,
-      replyTo,
-      subject,
-    } = data;
-
-    const formattedTarget = new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-    }).format(targetAmount);
-
-    const formattedCurrent = new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-    }).format(currentAmount);
-
-    const percentage = Math.min(100, Math.round((currentAmount / targetAmount) * 100));
-
-    const html = await this.githubTemplateService.getTemplate('donation-target-reached', {
-      campaignTitle,
-      targetAmount: formattedTarget,
-      currentAmount: formattedCurrent,
-      rawTargetAmount: targetAmount,
-      rawCurrentAmount: currentAmount,
-      donorsCount,
-      campaignUrl: campaignUrl || '#',
-      campaignImage: campaignImage || '',
-      organizerName: organizerName || 'The Campaign Team',
-      percentage,
-      achievementDate: new Date().toLocaleDateString(),
-      year: new Date().getFullYear(),
-      // Calculate overfunding if any
-      overfundedAmount: currentAmount > targetAmount ?
-        new Intl.NumberFormat('en-US', {
-          style: 'currency',
-          currency: 'USD',
-        }).format(currentAmount - targetAmount) : '$0.00',
-    });
-
-    await this.resend.emails.send({
-      from: this.configService.get<string>('resend.defaultFrom'),
-      to: Array.isArray(to) ? to : [to],
-      subject: subject || `🎉 We Did It! ${campaignTitle} Target Reached!`,
-      template: {id:"",variables:JSON.parse(html)},
-      cc: cc ? (Array.isArray(cc) ? cc : [cc]) : undefined,
-      bcc: bcc ? (Array.isArray(bcc) ? bcc : [bcc]) : undefined,
-      replyTo,
-    });
-
-    this.logger.log(`Donation target reached email sent to ${to}`);
+  private formatCurrency(amount: number) {
+    return `N${Number(amount || 0).toLocaleString()}`;
   }
 
-  private async processWelcomeEmail(data: any) {
-    const { to, name, activationLink, loginLink, profileSetupLink, cc, bcc, replyTo, subject } = data;
+  private buildQrCodeImageUrl(value?: string) {
+    if (!value) {
+      return '';
+    }
 
-    const html = await this.githubTemplateService.getTemplate('welcome', {
-      name,
-      activationLink: activationLink || '#',
-      loginLink: loginLink || '#',
-      profileSetupLink: profileSetupLink || '#',
-      year: new Date().getFullYear(),
-      signupDate: new Date().toLocaleDateString(),
-      supportEmail: 'support@example.com',
-      communityUrl: 'https://community.example.com',
-    });
+    const configuredBaseUrl =
+      process.env.MAIL_QR_CODE_IMAGE_BASE_URL?.trim() ||
+      'https://quickchart.io/qr?size=240&margin=1&text=';
 
-    await this.resend.emails.send({
-      from: this.configService.get<string>('resend.defaultFrom'),
-      to: Array.isArray(to) ? to : [to],
-      subject: subject || 'Welcome to Our Community!',
-      template: {id:"",variables:JSON.parse(html)},
-      cc: cc ? (Array.isArray(cc) ? cc : [cc]) : undefined,
-      bcc: bcc ? (Array.isArray(bcc) ? bcc : [bcc]) : undefined,
-      replyTo,
-    });
-
-    this.logger.log(`Welcome email sent to ${to}`);
+    return `${configuredBaseUrl}${encodeURIComponent(value)}`;
   }
 
-  private async processCustomEmail(data: any) {
-    const {
-      templateName,
-      to,
-      subject,
-      variables,
-      cc,
-      bcc,
-      replyTo,
-      attachments,
-    } = data;
+  private resolveFeature(jobName: string, data?: Record<string, any>) {
+    if (data?.feature && Object.values(MailFeature).includes(data.feature)) {
+      return data.feature as MailFeature;
+    }
 
-    const html = await this.githubTemplateService.getTemplate(templateName, {
-      ...variables,
-      year: new Date().getFullYear(),
-      currentDate: new Date().toLocaleDateString(),
-    });
+    switch (jobName) {
+      case 'emailVerificationCode':
+        return MailFeature.EMAIL_VERIFICATION_CODE;
+      case 'passwordResetCode':
+        return MailFeature.PASSWORD_RESET_CODE;
+      case 'ticketConfirmation':
+        return MailFeature.TICKET_CONFIRMATION;
+      case 'donationConfirmation':
+        return MailFeature.DONATION_CONFIRMATION;
+      case 'registrationConfirmation':
+        return MailFeature.REGISTRATION_CONFIRMATION;
+      case 'donationTargetReached':
+        return MailFeature.DONATION_TARGET_REACHED;
+      case 'impactMap':
+        return MailFeature.IMPACT_MAP;
+      case 'welcomeEmail':
+        return MailFeature.WELCOME_EMAIL;
+      default:
+        return MailFeature.CUSTOM_EMAIL;
+    }
+  }
 
-    await this.resend.emails.send({
-      from: this.configService.get<string>('resend.defaultFrom'),
-      to: Array.isArray(to) ? to : [to],
-      subject,
-     
-      cc: cc ? (Array.isArray(cc) ? cc : [cc]) : undefined,
-      bcc: bcc ? (Array.isArray(bcc) ? bcc : [bcc]) : undefined,
-      replyTo,
-      attachments,
-      template: {id:"",variables:JSON.parse(html)},
-    });
+  private asRecipients(value: string | string[]) {
+    return Array.isArray(value) ? value : [value];
+  }
 
-    this.logger.log(`Custom email ${templateName} sent to ${to}`);
+  private asOptionalRecipients(value?: string | string[]) {
+    if (!value) {
+      return undefined;
+    }
+
+    return this.asRecipients(value);
   }
 }

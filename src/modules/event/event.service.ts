@@ -4,11 +4,42 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
+import {
+  CreatorSettlementProfileStatus,
+  PaymentProvider,
+  Prisma,
+  Reoccurring,
+} from '@prisma/client';
 import { CreateEventDto } from './dto/create-event.dto';
+import { normalizeEventLinks } from './event-links.util';
 import { UpdateEventDto } from './dto/update-event.dto';
 import { CarpoolQueueService } from 'src/queue/carpool/queue.service';
 import { MediaService } from '../media/media.service';
 import { EventTicketService } from '../event-ticket/event-ticket.service';
+import { CreateEventTicketDto } from '../event-ticket/dto/create-event-ticket.dto';
+import { getCheckoutPricingConfig } from '../transaction-reference/payment-pricing.util';
+
+type ParsedEventTicketDto = CreateEventTicketDto & {
+  id?: string;
+  isVisible?: boolean;
+  updatedPrice?: number | null;
+};
+
+const eventCardInclude = {
+  community: true,
+  creator: {
+    select: {
+      id: true,
+      username: true,
+      profilePicUrlTN: true,
+    },
+  },
+  eventTickets: {
+    select: {
+      price: true,
+    },
+  },
+} satisfies Prisma.EventInclude;
 
 @Injectable()
 export class EventService {
@@ -18,6 +49,25 @@ export class EventService {
     private eventTicketService: EventTicketService,
     private mediaService: MediaService,
   ) {}
+
+  private getLowestTicketPrice(event: {
+    registrationType?: string | null;
+    eventTickets?: Array<{ price: number }> | null;
+  }) {
+    if (event.registrationType !== 'ticket' || !event.eventTickets?.length) {
+      return null;
+    }
+
+    const prices = event.eventTickets
+      .map((ticket) => Number(ticket.price))
+      .filter((price) => Number.isFinite(price) && price >= 0);
+
+    if (!prices.length) {
+      return null;
+    }
+
+    return Math.min(...prices);
+  }
 
   async create(
     userId: string,
@@ -37,17 +87,38 @@ export class EventService {
     //   thumbnailUrl = thumb;
     // }
 
+    const parsedTickets =
+      dto.registrationType === 'ticket'
+        ? this.parseTicketPayloads(dto.tickets)
+        : [];
+    const shouldCreateSettlementProfile = this.requiresSettlementProfile({
+      registrationType: dto.registrationType,
+      registrationFee: dto.registrationFee,
+      tickets: parsedTickets,
+    });
+
     // Start transaction for DB operations only
     const event = this.prisma.$transaction(async (tx) => {
+      if (shouldCreateSettlementProfile) {
+        await this.ensureCreatorSettlementProfile(tx, userId);
+      }
+
       const event = await tx.event.create({
         data: {
           title: dto.title,
           description: dto.description,
-          location: dto.location,
+          impactTitle: dto.impactTitle?.trim() || null,
+          impactDescription: dto.impactDescription?.trim() || null,
+          impactPercentage: this.resolveImpactPercentage(
+            dto.registrationType,
+            dto.impactPercentage,
+          ),
+          isPhysicalEvent: dto.isPhysicalEvent !== false,
+          location: dto.isPhysicalEvent === false ? null : dto.location,
           imageUrl: null,
           thumbnailUrl: null,
           isImageProcessing: !!file,
-          links: dto.links,
+          links: this.normalizeLinks(dto.links),
           tags: dto.tags,
           startDate: new Date(dto.startDate),
           endDate: new Date(dto.endDate),
@@ -73,15 +144,8 @@ export class EventService {
       });
 
       // If tickets exist, create them
-      console.log(dto.tickets);
-      if (
-        dto.registrationType === 'ticket' &&
-        dto.tickets &&
-        dto.tickets.length > 0
-      ) {
-        const trasformed = dto.tickets.map((ticket) => JSON.parse(ticket));
-        console.log(trasformed);
-        await this.eventTicketService.createMany(event.id, trasformed, tx);
+      if (dto.registrationType === 'ticket' && parsedTickets.length > 0) {
+        await this.eventTicketService.createMany(event.id, parsedTickets, tx);
       }
 
       return event;
@@ -114,52 +178,74 @@ export class EventService {
       throw new ForbiddenException('Unauthorized');
 
     try {
+      const effectiveRegistrationType = existingEvent.registrationType;
+      const effectiveReoccurring = dto.reoccurring ?? existingEvent.reoccurring;
+      const parsedTickets =
+        effectiveRegistrationType === 'ticket'
+          ? this.parseTicketPayloads(dto.tickets)
+          : [];
+
       const result = await this.prisma.$transaction(async (tx) => {
+        const eventUpdateData: Prisma.EventUncheckedUpdateInput = {
+          title: dto.title ?? undefined,
+          description: dto.description ?? undefined,
+          impactTitle:
+            dto.impactTitle !== undefined ? dto.impactTitle?.trim() || null : undefined,
+          impactDescription:
+            dto.impactDescription !== undefined
+              ? dto.impactDescription?.trim() || null
+              : undefined,
+          impactPercentage:
+            dto.impactPercentage !== undefined || effectiveRegistrationType === 'donation'
+              ? this.resolveImpactPercentage(
+                  effectiveRegistrationType,
+                  dto.impactPercentage,
+                )
+              : undefined,
+          isPhysicalEvent:
+            dto.isPhysicalEvent !== undefined ? dto.isPhysicalEvent : undefined,
+          location:
+            dto.isPhysicalEvent === false
+              ? null
+              : dto.location ?? undefined,
+          links:
+            dto.links !== undefined ? this.normalizeLinks(dto.links) : undefined,
+          tags: dto.tags ?? undefined,
+          reoccurring: dto.reoccurring ?? undefined,
+          communityId: dto.communityId ?? undefined,
+          startDate: dto.startDate ? new Date(dto.startDate) : undefined,
+          endDate: dto.endDate ? new Date(dto.endDate) : undefined,
+          isImageProcessing: file ? true : undefined,
+        };
+
+        if (dto.endRepeat !== undefined) {
+          eventUpdateData.endRepeat =
+            dto.endRepeat && effectiveReoccurring !== Reoccurring.NONE
+              ? new Date(dto.endRepeat)
+              : null;
+        } else if (dto.reoccurring === Reoccurring.NONE) {
+          eventUpdateData.endRepeat = null;
+        }
+
+        if (effectiveRegistrationType === 'registration') {
+          eventUpdateData.registrationFee = dto.registrationFee ?? undefined;
+          eventUpdateData.registrationAttendees =
+            dto.registrationAttendees ?? undefined;
+        }
+
+        if (effectiveRegistrationType === 'donation') {
+          eventUpdateData.donationTarget = dto.donationTarget ?? undefined;
+        }
+
         // 2) Update the event itself
         const updatedEvent = await tx.event.update({
           where: { id },
-          data: {
-            // spread only fields you actually allow from dto
-            title: dto.title ?? undefined,
-            description: dto.description ?? undefined,
-            location: dto.location ?? undefined,
-            links: dto.links ?? undefined,
-            tags: dto.tags ?? undefined,
-            reoccurring: dto.reoccurring ?? undefined,
-            endRepeat:
-              dto.endRepeat && dto.reoccurring !== 'NONE'
-                ? new Date(dto.endRepeat)
-                : dto.endRepeat === undefined
-                  ? undefined
-                  : null,
-            communityId: dto.communityId ?? undefined,
-            registrationType: dto.registrationType ?? undefined,
-            registrationFee:
-              dto.registrationType === 'registration'
-                ? dto.registrationFee
-                : null,
-            registrationAttendees:
-              dto.registrationType === 'registration'
-                ? dto.registrationAttendees
-                : null,
-            startDate: dto.startDate ? new Date(dto.startDate) : undefined,
-            endDate: dto.endDate ? new Date(dto.endDate) : undefined,
-            // 🆕 Handle image processing flag
-            isImageProcessing: file ? true : undefined,
-            donationTarget:
-              dto.registrationType === 'donation' ? dto.donationTarget : null,
-          },
+          data: eventUpdateData,
         });
 
         // 3) Ticket updates
-        if (
-          dto.registrationType === 'ticket' &&
-          dto.tickets &&
-          dto.tickets.length > 0
-        ) {
-          for (const raw of dto.tickets) {
-            const ticket = typeof raw === 'string' ? JSON.parse(raw) : raw;
-
+        if (effectiveRegistrationType === 'ticket' && parsedTickets.length > 0) {
+          for (const ticket of parsedTickets) {
             const existingTicket = await tx.eventTicket.findUnique({
               where: { id: ticket.id },
             });
@@ -203,6 +289,24 @@ export class EventService {
           }
         }
 
+        const currentTickets =
+          effectiveRegistrationType === 'ticket'
+            ? await tx.eventTicket.findMany({
+                where: { eventId: id },
+                select: { price: true, updatedPrice: true },
+              })
+            : [];
+
+        if (
+          this.requiresSettlementProfile({
+            registrationType: effectiveRegistrationType,
+            registrationFee: updatedEvent.registrationFee,
+            tickets: currentTickets,
+          })
+        ) {
+          await this.ensureCreatorSettlementProfile(tx, userId);
+        }
+
         return updatedEvent;
       });
 
@@ -237,6 +341,78 @@ export class EventService {
     }
   }
 
+  private parseTicketPayloads(
+    tickets?: Array<string | ParsedEventTicketDto>,
+  ): ParsedEventTicketDto[] {
+    if (!tickets?.length) {
+      return [];
+    }
+
+    return tickets.map((ticket) =>
+      typeof ticket === 'string' ? JSON.parse(ticket) : ticket,
+    );
+  }
+
+  private normalizeLinks(links?: string[] | null) {
+    if (!links?.length) {
+      return [];
+    }
+
+    return normalizeEventLinks(links);
+  }
+
+  private resolveImpactPercentage(
+    registrationType?: string | null,
+    impactPercentage?: number | null,
+  ) {
+    if (registrationType === 'donation') {
+      return 100;
+    }
+
+    if (impactPercentage === null || impactPercentage === undefined) {
+      return null;
+    }
+
+    return Math.max(1, Math.min(100, Math.round(Number(impactPercentage))));
+  }
+
+  private requiresSettlementProfile(input: {
+    registrationType?: string | null;
+    registrationFee?: number | null;
+    tickets?: Array<{ price?: number | null; updatedPrice?: number | null }>;
+  }) {
+    if (input.registrationType === 'donation') {
+      return true;
+    }
+
+    if (input.registrationType === 'registration') {
+      return Number(input.registrationFee || 0) > 0;
+    }
+
+    if (input.registrationType === 'ticket') {
+      return (input.tickets || []).some(
+        (ticket) => Number(ticket.updatedPrice ?? ticket.price ?? 0) > 0,
+      );
+    }
+
+    return false;
+  }
+
+  private async ensureCreatorSettlementProfile(
+    tx: Prisma.TransactionClient,
+    userId: string,
+  ) {
+    await tx.creatorSettlementProfile.createMany({
+      data: [
+        {
+          userId,
+          status: CreatorSettlementProfileStatus.NOT_STARTED,
+        },
+      ],
+      skipDuplicates: true,
+    });
+  }
+
   async findAll() {
     return this.prisma.event.findMany({
       include: { community: true, creator: true },
@@ -261,11 +437,44 @@ export class EventService {
     });
     if (!event) throw new NotFoundException('Event not found');
 
+    const hasPaidTicket = event.eventTickets.some((ticket) => ticket.price > 0);
+    const hasPaidRegistration =
+      event.registrationType === 'registration' && (event.registrationFee || 0) > 0;
+    const acceptsDonations = event.registrationType === 'donation';
+    const requiresPayment = hasPaidTicket || hasPaidRegistration || acceptsDonations;
+
+    const creatorAlatProfile = await this.prisma.creatorAlatProfile.findUnique({
+      where: { userId: event.creator.id },
+      select: {
+        status: true,
+        displayName: true,
+        businessId: true,
+      },
+    });
+    const creatorSettlementProfile =
+      await this.prisma.creatorSettlementProfile.findUnique({
+        where: { userId: event.creator.id },
+        select: {
+          status: true,
+        },
+      });
+    const supportsAlatTransfer =
+      requiresPayment &&
+      creatorSettlementProfile?.status === 'ACTIVE' &&
+      creatorAlatProfile?.status === 'ACTIVE' &&
+      Boolean(creatorAlatProfile?.businessId);
+    const availableProviders =
+      supportsAlatTransfer
+        ? [PaymentProvider.PAYSTACK, PaymentProvider.ALAT_TRANSFER]
+        : requiresPayment
+          ? [PaymentProvider.PAYSTACK]
+          : [];
+
     // Calculate total donations for this event
     const totalDonationsResult = await this.prisma.donation.aggregate({
       where: {
         eventId: id,
-        status: 'active', // Assuming you have a status field
+        status: 'completed', // Assuming you have a status field
       },
       _sum: {
         amount: true,
@@ -299,6 +508,20 @@ export class EventService {
       totalDonations, // Add total donations in kobo (or whatever unit your amount is)
       isFollowingCreator: Boolean(isFollowingCreator),
       isFollowedByCreator: Boolean(isFollowedByCreator),
+      paymentOptions: {
+        requiresPayment,
+        supportsPaystack: requiresPayment,
+        supportsAlatTransfer,
+        availableProviders,
+        alatTransferDisplayName: supportsAlatTransfer
+          ? creatorAlatProfile?.displayName || null
+          : null,
+        alatTransferUnavailableReason:
+          requiresPayment && !supportsAlatTransfer
+            ? 'ALAT transfer is not available for this event yet'
+            : null,
+        pricingConfig: getCheckoutPricingConfig({ availableProviders }),
+      },
     };
   }
 
@@ -361,16 +584,7 @@ export class EventService {
         creatorId: userId,
         endDate: { gte: nowMinus24h },
       },
-      include: {
-        community: true,
-        creator: {
-          select: {
-            id: true,
-            username: true,
-            profilePicUrlTN: true,
-          },
-        },
-      },
+      include: eventCardInclude,
     });
 
     for (const ev of createdEvents) {
@@ -387,16 +601,7 @@ export class EventService {
       where: { userId },
       include: {
         event: {
-          include: {
-            community: true,
-            creator: {
-              select: {
-                id: true,
-                username: true,
-                profilePicUrlTN: true,
-              },
-            },
-          },
+          include: eventCardInclude,
         },
       },
     });
@@ -423,16 +628,7 @@ export class EventService {
         eventTicket: {
           include: {
             event: {
-              include: {
-                community: true,
-                creator: {
-                  select: {
-                    id: true,
-                    username: true,
-                    profilePicUrlTN: true,
-                  },
-                },
-              },
+              include: eventCardInclude,
             },
           },
         },
@@ -465,16 +661,7 @@ export class EventService {
             { tags: { hasSome: preferredInterests } },
           ],
         },
-        include: {
-          community: true,
-          creator: {
-            select: {
-              id: true,
-              username: true,
-              profilePicUrlTN: true,
-            },
-          },
-        },
+        include: eventCardInclude,
         take: 20,
       });
 
@@ -492,16 +679,7 @@ export class EventService {
     if (events.length < 10) {
       const fallbackEvents = await this.prisma.event.findMany({
         where: { endDate: { gte: nowMinus24h } },
-        include: {
-          community: true,
-          creator: {
-            select: {
-              id: true,
-              username: true,
-              profilePicUrlTN: true,
-            },
-          },
-        },
+        include: eventCardInclude,
         orderBy: { startDate: 'asc' },
         take: 20,
       });
@@ -542,7 +720,12 @@ export class EventService {
       return { ...event, reason };
     });
 
-    return eventResults.slice(0, 10); // ensure max 10
+    const eventsWithPricing = eventResults.map((event) => ({
+      ...event,
+      lowestTicketPrice: this.getLowestTicketPrice(event),
+    }));
+
+    return eventsWithPricing.slice(0, 10); // ensure max 10
   }
 
   async getAllUserEvents(userId: string, page = 1, pageSize = 10) {
@@ -555,16 +738,7 @@ export class EventService {
      */
     const createdEvents = await this.prisma.event.findMany({
       where: { creatorId: userId },
-      include: {
-        community: true,
-        creator: {
-          select: {
-            id: true,
-            username: true,
-            profilePicUrlTN: true,
-          },
-        },
-      },
+      include: eventCardInclude,
     });
 
     for (const ev of createdEvents) {
@@ -581,16 +755,7 @@ export class EventService {
       where: { userId },
       include: {
         event: {
-          include: {
-            community: true,
-            creator: {
-              select: {
-                id: true,
-                username: true,
-                profilePicUrlTN: true,
-              },
-            },
-          },
+          include: eventCardInclude,
         },
       },
     });
@@ -615,16 +780,7 @@ export class EventService {
         eventTicket: {
           include: {
             event: {
-              include: {
-                community: true,
-                creator: {
-                  select: {
-                    id: true,
-                    username: true,
-                    profilePicUrlTN: true,
-                  },
-                },
-              },
+              include: eventCardInclude,
             },
           },
         },
@@ -655,7 +811,12 @@ export class EventService {
      */
     const total = events.length;
     const startIndex = (page - 1) * pageSize;
-    const paginatedEvents = events.slice(startIndex, startIndex + pageSize);
+    const paginatedEvents = events
+      .slice(startIndex, startIndex + pageSize)
+      .map((event) => ({
+        ...event,
+        lowestTicketPrice: this.getLowestTicketPrice(event),
+      }));
 
     console.log({
       total,

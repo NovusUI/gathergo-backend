@@ -18,6 +18,7 @@ export interface CreateNotificationData {
 @Injectable()
 export class NotificationService {
   private readonly logger = new Logger(NotificationService.name);
+  private readonly unreadKeyPrefix = 'notification:unread:';
 
   constructor(
     private readonly prisma: PrismaService,
@@ -48,7 +49,7 @@ export class NotificationService {
       // Increment unread counts in Redis for all recipients
       await Promise.all(
         data.recipientIds.map((recipientId) =>
-          this.redisService.client.incr(`notification:unread:${recipientId}`),
+          this.redisService.client.incr(this.getUnreadCountKey(recipientId)),
         ),
       );
 
@@ -121,14 +122,12 @@ export class NotificationService {
         where: { id: notificationId },
         data: { read: true },
       });
+      await this.syncUnreadCount(userId);
 
-      // Decrement Redis count
-      const currentCount = await this.redisService.client.get(
-        `notification:unread:${userId}`,
-      );
-      if (currentCount && parseInt(currentCount) > 0) {
-        await this.redisService.client.decr(`notification:unread:${userId}`);
-      }
+      return {
+        ...notification,
+        read: true,
+      };
     }
 
     return notification;
@@ -141,15 +140,18 @@ export class NotificationService {
       data: { read: true },
     });
 
-    // Reset Redis count
-    await this.redisService.client.set(`notification:unread:${userId}`, 0);
+    await this.redisService.client.set(this.getUnreadCountKey(userId), 0);
   }
 
   async getUnreadCount(userId: string): Promise<number> {
-    const count = await this.redisService.client.get(
-      `notification:unread:${userId}`,
-    );
-    return parseInt(count || '0');
+    const count = await this.redisService.client.get(this.getUnreadCountKey(userId));
+    const parsedCount = Number.parseInt(count ?? '', 10);
+
+    if (count === null || Number.isNaN(parsedCount) || parsedCount < 0) {
+      return this.syncUnreadCount(userId);
+    }
+
+    return parsedCount;
   }
 
   async getNotificationTray(userId: string) {
@@ -163,5 +165,21 @@ export class NotificationService {
       totalUnread,
       hasMore: notifications.length === 10,
     };
+  }
+
+  private getUnreadCountKey(userId: string) {
+    return `${this.unreadKeyPrefix}${userId}`;
+  }
+
+  private async syncUnreadCount(userId: string) {
+    const unreadCount = await this.prisma.notification.count({
+      where: {
+        recipientId: userId,
+        read: false,
+      },
+    });
+
+    await this.redisService.client.set(this.getUnreadCountKey(userId), unreadCount);
+    return unreadCount;
   }
 }

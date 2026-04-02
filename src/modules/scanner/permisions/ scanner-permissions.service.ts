@@ -12,6 +12,14 @@ import {
 } from '../dto/permission.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 
+type PermissionUserSummary = {
+  id: string;
+  username?: string | null;
+  fullName?: string | null;
+  profilePicUrl?: string | null;
+  profilePicUrlTN?: string | null;
+};
+
 @Injectable()
 export class ScannerPermissionsService {
   private readonly logger = new Logger(ScannerPermissionsService.name);
@@ -55,22 +63,25 @@ export class ScannerPermissionsService {
           ownerId,
           scannerId,
         },
+      
       },
       include: {
         scanner: {
           select: {
             id: true,
             username: true,
-            email: true,
             fullName: true,
+            profilePicUrl: true,
+            profilePicUrlTN: true,
           },
         },
         owner: {
           select: {
             id: true,
             username: true,
-            email: true,
             fullName: true,
+            profilePicUrl: true,
+            profilePicUrlTN: true,
           },
         },
       },
@@ -83,22 +94,25 @@ export class ScannerPermissionsService {
         data: {
           isActive: true,
           expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
+          isDeleted:false,
         },
         include: {
           scanner: {
             select: {
               id: true,
               fullName: true,
-              email: true,
               username: true,
               profilePicUrl: true,
+              profilePicUrlTN: true,
             },
           },
           owner: {
             select: {
               id: true,
               fullName: true,
-              email: true,
+              username: true,
+              profilePicUrl: true,
+              profilePicUrlTN: true,
             },
           },
         },
@@ -122,16 +136,18 @@ export class ScannerPermissionsService {
           select: {
             id: true,
             fullName: true,
-            email: true,
             username: true,
             profilePicUrl: true,
+            profilePicUrlTN: true,
           },
         },
         owner: {
           select: {
             id: true,
             fullName: true,
-            email: true,
+            username: true,
+            profilePicUrl: true,
+            profilePicUrlTN: true,
           },
         },
       },
@@ -169,16 +185,18 @@ export class ScannerPermissionsService {
           select: {
             id: true,
             fullName: true,
-            email: true,
             username: true,
             profilePicUrl: true,
+            profilePicUrlTN: true,
           },
         },
         owner: {
           select: {
             id: true,
             fullName: true,
-            email: true,
+            username: true,
+            profilePicUrl: true,
+            profilePicUrlTN: true,
           },
         },
       },
@@ -221,16 +239,18 @@ export class ScannerPermissionsService {
           select: {
             id: true,
             fullName: true,
-            email: true,
             username: true,
             profilePicUrl: true,
+            profilePicUrlTN: true,
           },
         },
         owner: {
           select: {
             id: true,
             fullName: true,
-            email: true,
+            username: true,
+            profilePicUrl: true,
+            profilePicUrlTN: true,
           },
         },
       },
@@ -249,7 +269,6 @@ export class ScannerPermissionsService {
           select: {
             id: true,
             fullName: true,
-            email: true,
             username: true,
             profilePicUrl: true,
             profilePicUrlTN: true,
@@ -259,7 +278,9 @@ export class ScannerPermissionsService {
           select: {
             id: true,
             username: true,
-            email: true,
+            fullName: true,
+            profilePicUrl: true,
+            profilePicUrlTN: true,
           },
         },
       },
@@ -277,7 +298,6 @@ export class ScannerPermissionsService {
       },
     });
 
-    console.log(permissions, 'permission');
     return permissions.map((permission) =>
       this.mapPermissionToResponse(permission, ownerEvents),
     );
@@ -366,18 +386,16 @@ export class ScannerPermissionsService {
       where,
       select: {
         id: true,
-        email: true,
         username: true,
         fullName: true,
         profilePicUrl: true,
         profilePicUrlTN: true,
-        createdAt: true,
       },
       take: limit,
-      orderBy: { createdAt: 'desc' },
+      orderBy: { username: 'asc' },
     });
 
-    return users;
+    return users.map((user) => this.mapUserSummary(user));
   }
 
   // Remove permission permanently
@@ -448,18 +466,18 @@ export class ScannerPermissionsService {
           select: {
             id: true,
             fullName: true,
-            email: true,
             username: true,
+            profilePicUrl: true,
+            profilePicUrlTN: true,
           },
         },
       },
     });
 
-    return permissions.map(async (permission) => ({
+    return permissions.map((permission) => ({
       permissionId: permission.id,
       ownerId: permission.ownerId,
-      ownerName: permission.owner.fullName || permission.owner.username,
-      ownerEmail: permission.owner.email,
+      owner: this.mapUserSummary(permission.owner),
       expiresAt: permission.expiresAt,
       createdAt: permission.createdAt,
     }));
@@ -490,19 +508,22 @@ export class ScannerPermissionsService {
     return {
       id: permission.id,
       scannerId: permission.scannerId,
-      scannerName:
-        permission.scanner.fullName ||
-        permission.scanner.username ||
-        permission.scanner.email,
-      scannerEmail: permission.scanner.email,
-      scannerImage: permission.scanner.profilePicUrl,
       ownerId: permission.ownerId,
-      ownerName: permission.owner.fullName || permission.owner.username,
-      ownerEmail: permission.owner.email,
+      scanner: this.mapUserSummary(permission.scanner),
+      owner: this.mapUserSummary(permission.owner),
       isActive: permission.isActive,
       expiresAt: permission.expiresAt,
       createdAt: permission.createdAt,
       accessibleEvents: accessibleEvents || [],
+    };
+  }
+
+  private mapUserSummary(user: PermissionUserSummary) {
+    return {
+      id: user.id,
+      username: user.username || null,
+      fullName: user.fullName || null,
+      profilePicUrl: user.profilePicUrlTN || user.profilePicUrl || null,
     };
   }
 }

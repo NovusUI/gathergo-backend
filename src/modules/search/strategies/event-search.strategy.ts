@@ -6,6 +6,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 
 @Injectable()
 export class EventSearchStrategy {
+  /**TODO: search result shouldnt return everything */
   constructor(private readonly prisma: PrismaService) {}
 
   async search(dto: SearchQueryDto): Promise<SearchResultDto<any>> {
@@ -20,17 +21,26 @@ export class EventSearchStrategy {
     console.log(limit,"limit")
     const data = await this.prisma.$queryRawUnsafe<any[]>(
       `
-      SELECT *,
+      SELECT
+        e.*,
+        (
+          SELECT MIN(et.price)
+          FROM "EventTicket" et
+          WHERE et."eventId" = e.id
+            AND et."isVisible" = true
+        ) AS "lowestTicketPrice",
         GREATEST(
-          similarity(title, $1),
-          similarity(description, $1),
-          similarity(location, $1)
+          similarity(e.title, $1),
+          similarity(e.description, $1),
+          similarity(COALESCE(e.location, ''), $1),
+          similarity(COALESCE(e."impactTitle", ''), $1)
         ) AS score
-      FROM "Event"
+      FROM "Event" e
       WHERE
-        similarity(title, $1) > 0.2 OR
-        similarity(description, $1) > 0.2 OR
-        similarity(location, $1) > 0.2
+        similarity(e.title, $1) > 0.2 OR
+        similarity(e.description, $1) > 0.2 OR
+        similarity(COALESCE(e.location, ''), $1) > 0.2 OR
+        similarity(COALESCE(e."impactTitle", ''), $1) > 0.2
       ORDER BY score DESC
       OFFSET $2 LIMIT $3
       `,
@@ -45,7 +55,8 @@ export class EventSearchStrategy {
       WHERE
         similarity(title, $1) > 0.2 OR
         similarity(description, $1) > 0.2 OR
-        similarity(location, $1) > 0.2
+        similarity(location, $1) > 0.2 OR
+        similarity(COALESCE("impactTitle", ''), $1) > 0.2
       `,
       query,
     );

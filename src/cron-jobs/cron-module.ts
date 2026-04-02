@@ -1,20 +1,22 @@
 // src/cron-jobs/cron.module.ts
 import { Module } from '@nestjs/common';
-import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { RecurringEventService } from './recurring-event.service'; // update path if needed
 import { CarpoolCleanupService } from './capool-cleanup.service';
 import { NotificationCleanupService } from './notification-cleanup.service';
 import { NotificationsService } from 'src/modules/background-notification/backgroundnotification.service';
+import { MailModule } from 'src/modules/mail/mail.module';
+import { DonationImpactMapService } from './donation-impact-map.service';
 
 @Module({
-  imports: [ScheduleModule.forRoot()],
+  imports: [MailModule],
   providers: [
     RecurringEventService,
     PrismaService,
     CarpoolCleanupService,
     NotificationCleanupService,
     NotificationsService,
+    DonationImpactMapService,
   ],
 })
 export class CronModule {}

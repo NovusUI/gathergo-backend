@@ -1,43 +1,38 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { MailService } from './mail.service';
-//import { MailProcessor } from './mail.processor';
 import { ConfigModule } from '@nestjs/config';
+import { MailProcessor } from './mail.processor';
+import { MailSettingsService } from './mail-settings.service';
+import { MailDeliveryService } from './mail-delivery.service';
+import { getRedisOptions } from 'src/config/runtime-env';
 
 @Module({
   imports: [
     ConfigModule.forFeature(() => ({
       redis: {
-        host: process.env.REDIS_HOST,
-        port: parseInt(process.env.REDIS_PORT || '6379', 10),
-        password: process.env.REDIS_PASSWORD,
+        ...getRedisOptions(),
       },
       resend: {
         apiKey: process.env.RESEND_API_KEY,
         defaultFrom: process.env.RESEND_DEFAULT_FROM || 'onboarding@resend.dev',
       },
-      github: {
-        token: process.env.GITHUB_TOKEN,
-        owner: process.env.GITHUB_OWNER,
-        repo: process.env.GITHUB_REPO,
-        templatesPath: process.env.GITHUB_TEMPLATES_PATH || 'email-templates',
-      },
     })),
     BullModule.forRootAsync({
       useFactory: () => ({
-        connection: {
-          host: process.env.REDIS_HOST,
-          port: parseInt(process.env.REDIS_PORT || '6379', 10),
-          password: process.env.REDIS_PASSWORD,
-        },
+        connection: getRedisOptions(),
       }),
     }),
     BullModule.registerQueue({
       name: 'mailQueue',
     }),
   ],
-  // providers: [MailService, MailProcessor],
-  providers:[MailService],
+  providers: [
+    MailService,
+    MailProcessor,
+    MailSettingsService,
+    MailDeliveryService,
+  ],
   exports: [MailService],
 })
 export class MailModule {}

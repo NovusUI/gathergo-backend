@@ -1,38 +1,66 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
-import { nanoid } from 'nanoid';
+import { generateOpaqueCode } from 'src/common/utils/generate-opaque-code.util';
 import { NotificationService } from '../notification/notification.service';
 import { notificationConstants } from 'src/common/constants';
 import { FeedIntegrationService } from '../feed/feed-integration.service';
+import { MailService } from '../mail/mail.service';
 
 @Injectable()
 export class TicketService {
+  private readonly logger = new Logger(TicketService.name);
+
   constructor(
-    private prisma: PrismaService,
-    private notificationService: NotificationService,
-    private feedIntegrationService: FeedIntegrationService,
+    private readonly prisma: PrismaService,
+    private readonly notificationService: NotificationService,
+    private readonly feedIntegrationService: FeedIntegrationService,
+    private readonly mailService: MailService,
   ) {}
 
   async create(
     transaction: any,
     paidTickets: any[],
     eventId: string,
-    username: string,
+    username?: string,
   ) {
+    const purchaser = await this.resolvePurchaser(transaction);
+    const saleActorName =
+      username ||
+      purchaser?.username ||
+      purchaser?.fullName ||
+      purchaser?.email?.split('@')[0] ||
+      'customer';
     const unavailableTickets: {
       id: string;
       reason: string;
       ticketName: string;
     }[] = [];
 
-    const createdTicketIds: string[] = [];
+    const ticketPurchaseFeedItems: {
+      eventTicketId: string;
+      ticketIds: string[];
+      quantity: number;
+    }[] = [];
     for (const item of paidTickets) {
       const eventTicket = await this.prisma.eventTicket.findUnique({
         where: { id: item.eventTicketId },
+        include: {
+          event: {
+            select: {
+              id: true,
+              title: true,
+              startDate: true,
+              location: true,
+              thumbnailUrl: true,
+              creatorId: true,
+            },
+          },
+        },
       });
 
       if (!eventTicket) {
@@ -44,7 +72,8 @@ export class TicketService {
         continue;
       }
 
-      const availableQty = Math.min(item.quantity, eventTicket.quantity);
+      const availableStock = Math.max(eventTicket.quantity - eventTicket.sold, 0);
+      const availableQty = Math.min(item.quantity, availableStock);
 
       if (availableQty === 0) {
         unavailableTickets.push({
@@ -60,7 +89,7 @@ export class TicketService {
         data: Array.from({ length: availableQty }).map(() => ({
           eventTicketId: item.eventTicketId,
           userId: transaction.userId,
-          qrCode: nanoid(16),
+          qrCode: generateOpaqueCode(16),
           transactionId: transaction.id,
         })),
       });
@@ -76,7 +105,13 @@ export class TicketService {
         take: availableQty,
       });
 
-      createdTicketIds.push(...createdTickets.map((t) => t.id));
+      if (createdTickets.length > 0) {
+        ticketPurchaseFeedItems.push({
+          eventTicketId: item.eventTicketId,
+          ticketIds: createdTickets.map((ticket) => ticket.id),
+          quantity: createdTickets.length,
+        });
+      }
 
       // Update stock
       await this.prisma.eventTicket.update({
@@ -84,18 +119,15 @@ export class TicketService {
         data: { sold: { increment: availableQty } },
       });
 
-      for (const ticket of createdTickets) {
-        this.feedIntegrationService
-          .onTicketPurchased(
-            eventId,
-            transaction.userId,
-            ticket.id,
-            item.eventTicketId,
-          )
-          .then((data) => {
-            console.log(data);
-          });
-      }
+      await Promise.all(
+        createdTickets.map((ticket) =>
+          this.queueTicketConfirmationEmail({
+            purchaser,
+            eventTicket,
+            ticket,
+          }),
+        ),
+      );
 
       if (availableQty < item.quantity) {
         unavailableTickets.push({
@@ -103,6 +135,22 @@ export class TicketService {
           reason: `Only ${availableQty} issued out of ${item.quantity} requested`,
           ticketName: item.ticketName,
         });
+      }
+    }
+
+    if (ticketPurchaseFeedItems.length > 0) {
+      try {
+        await this.feedIntegrationService.onTicketPurchaseBatch(
+          eventId,
+          transaction.userId,
+          ticketPurchaseFeedItems,
+        );
+      } catch (error) {
+        const reason =
+          error instanceof Error ? error.message : 'unknown feed error';
+        this.logger.warn(
+          `Failed to generate ticket purchase feed for event ${eventId}: ${reason}`,
+        );
       }
     }
 
@@ -121,7 +169,7 @@ export class TicketService {
         .createNotification({
           recipientIds: [event.creatorId],
           title: notificationConstants.EVENT_TICKET_SALE_TITLE,
-          message: notificationConstants.EVENT_TICKET_SALE_MESSAGE(username),
+          message: notificationConstants.EVENT_TICKET_SALE_MESSAGE(saleActorName),
           type: notificationConstants.EVENT_TICKET_SALE,
           imageUrl: event.thumbnailUrl || '',
           data: {
@@ -135,12 +183,123 @@ export class TicketService {
     } catch (error) {}
   }
 
+  private async queueTicketConfirmationEmail(input: {
+    purchaser: {
+      email: string | null;
+      username?: string | null;
+      fullName?: string | null;
+    } | null;
+    eventTicket: {
+      type: string;
+      price: number;
+      updatedPrice?: number | null;
+      event?: {
+        id: string;
+        title: string;
+        startDate: Date;
+        location?: string | null;
+        thumbnailUrl?: string | null;
+      } | null;
+    };
+    ticket: {
+      id: string;
+      qrCode: string;
+    };
+  }) {
+    const { purchaser, eventTicket, ticket } = input;
+
+    if (!purchaser?.email || !eventTicket.event) {
+      return;
+    }
+
+    try {
+      const result = await this.mailService.sendTicketConfirmation({
+        to: purchaser.email,
+        name: this.resolveDisplayName(purchaser),
+        eventTitle: eventTicket.event.title,
+        eventDate: eventTicket.event.startDate.toLocaleDateString(),
+        venue: eventTicket.event.location || 'Online',
+        ticketId: ticket.id,
+        ticketType: eventTicket.type,
+        price: Number(eventTicket.updatedPrice ?? eventTicket.price ?? 0),
+        quantity: 1,
+        eventImage: eventTicket.event.thumbnailUrl || undefined,
+        qrCode: ticket.qrCode,
+      });
+
+      if (result.skipped) {
+        this.logger.warn(
+          `Skipped ticket confirmation email for ${purchaser.email}: ${result.reason}`,
+        );
+      }
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : 'unknown mail error';
+      this.logger.warn(
+        `Failed to queue ticket confirmation email for ${purchaser.email}: ${reason}`,
+      );
+    }
+  }
+
+  private async resolvePurchaser(transaction: any) {
+    if (transaction?.user?.email) {
+      return transaction.user;
+    }
+
+    if (!transaction?.userId) {
+      return null;
+    }
+
+    return this.prisma.user.findUnique({
+      where: { id: transaction.userId },
+      select: {
+        email: true,
+        username: true,
+        fullName: true,
+      },
+    });
+  }
+
+  private resolveDisplayName(user: {
+    email?: string | null;
+    username?: string | null;
+    fullName?: string | null;
+  }) {
+    const preferredName = user.fullName?.trim() || user.username?.trim();
+    if (preferredName) {
+      return preferredName;
+    }
+
+    const emailLocalPart = user.email?.split('@')[0]?.trim();
+    return emailLocalPart || 'there';
+  }
+
   async getMyTickets(userId: string) {
     return this.prisma.ticket.findMany({
-      where: { userId },
+      where: { userId, status: 'active' },
       include: {
-        eventTicket: true,
+        eventTicket: {
+          select: {
+            id: true,
+            type: true,
+            price: true,
+            updatedPrice: true,
+            event: {
+              select: {
+                id: true,
+                title: true,
+                thumbnailUrl: true,
+                startDate: true,
+                endDate: true,
+                location: true,
+                registrationType: true,
+                isPhysicalEvent: true,
+              },
+            },
+          },
+        },
       },
+      orderBy: { createdAt: 'desc' },
     });
   }
 

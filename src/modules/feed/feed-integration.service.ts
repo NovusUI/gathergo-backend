@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { FeedService } from './feed.service';
+import { FeedService, TicketPurchaseBatchItem } from './feed.service';
 
 @Injectable()
 export class FeedIntegrationService {
@@ -11,11 +11,24 @@ export class FeedIntegrationService {
     ticketId: string,
     eventTicketId: string,
   ) {
-    return this.feedService.generateTicketPurchaseFeed(
+    return this.onTicketPurchaseBatch(eventId, userId, [
+      {
+        eventTicketId,
+        ticketIds: [ticketId],
+        quantity: 1,
+      },
+    ]);
+  }
+
+  async onTicketPurchaseBatch(
+    eventId: string,
+    userId: string,
+    purchases: TicketPurchaseBatchItem[],
+  ) {
+    return this.feedService.generateTicketPurchaseBatchFeed(
       eventId,
       userId,
-      ticketId,
-      eventTicketId,
+      purchases,
     );
   }
 
@@ -25,6 +38,7 @@ export class FeedIntegrationService {
     donationId: string,
     amount: number,
     isAnonymous: boolean = false,
+    supportMessage?: string | null,
   ) {
     return this.feedService.generateDonationFeed(
       eventId,
@@ -32,18 +46,24 @@ export class FeedIntegrationService {
       amount,
       isAnonymous,
       userId,
+      supportMessage,
     );
   }
 
   async onRegistrationCompleted(
     eventId: string,
     userId: string,
-    registrationId: string,
+    registrationId?: string | null,
+    options?: {
+      beneficiaryType?: 'SELF' | 'SPONSORED';
+      sponsorshipNote?: string | null;
+    },
   ) {
     return this.feedService.generateRegistrationFeed(
       eventId,
       userId,
-      registrationId,
+      registrationId || null,
+      options,
     );
   }
 

@@ -36,11 +36,13 @@ export class ScannerPermissionsController {
   @Post('grant')
   @ApiOperation({ summary: 'Grant scanning permission to a user' })
   async grantPermission(
+    @CurrentUser('id') userId: string,
     @Body() grantPermissionDto: GrantPermissionDto,
-    @Request() req,
+
   ) {
+  
     return this.permissionsService.grantPermission(
-      req.user.id,
+      userId,
       grantPermissionDto,
     );
   }
@@ -49,11 +51,13 @@ export class ScannerPermissionsController {
   @ApiOperation({ summary: 'Update scanning permission' })
   async updatePermission(
     @Param('permissionId') permissionId: string,
+    @CurrentUser('id') userId: string,
     @Body() updatePermissionDto: UpdatePermissionDto,
-    @Request() req,
+
+
   ) {
     return this.permissionsService.updatePermission(
-      req.user.id,
+      userId,
       permissionId,
       updatePermissionDto,
     );
@@ -63,9 +67,9 @@ export class ScannerPermissionsController {
   @ApiOperation({ summary: 'Revoke scanning permission (deactivate)' })
   async revokePermission(
     @Param('permissionId') permissionId: string,
-    @Request() req,
+    @CurrentUser('id') userId: string,
   ) {
-    return this.permissionsService.revokePermission(req.user.id, permissionId);
+    return this.permissionsService.revokePermission(userId, permissionId);
   }
 
   @Get('my-granted')
