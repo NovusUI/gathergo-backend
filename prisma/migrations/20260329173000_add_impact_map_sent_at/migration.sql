@@ -1,0 +1,2 @@
+ALTER TABLE "Event"
+ADD COLUMN "impactMapSentAt" TIMESTAMP(3);

@@ -31,6 +31,30 @@
 $ yarn install
 ```
 
+## Local environment
+
+Keep your laptop-specific values in `.env.local` and let `.env` hold the
+shared defaults you want to remember. `.env.local` is ignored by git and now
+loads before `.env`, so it safely overrides shared values for local runs.
+
+Use the tracked templates as a starting point:
+
+- `.env.local.example` for local development
+- `.env.render.example` for the Render service dashboard
+
+Example local overrides:
+
+```bash
+NODE_ENV=development
+DATABASE_URL=postgresql://localhost:5432/gathergo
+REDIS_URL=redis://127.0.0.1:6379
+FRONTEND_URL=http://localhost:8081
+GOOGLE_CALLBACK_URL=http://localhost:4000/api/v1/auth/google/redirect
+```
+
+Render should keep using service environment variables instead of any local
+dotenv file.
+
 ## Compile and run the project
 
 ```bash

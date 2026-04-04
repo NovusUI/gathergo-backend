@@ -1,0 +1,6 @@
+ALTER TABLE "Event"
+ADD COLUMN "isPhysicalEvent" BOOLEAN NOT NULL DEFAULT true;
+
+ALTER TABLE "Carpool"
+ADD COLUMN "vehicleIcon" TEXT;
+

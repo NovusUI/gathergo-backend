@@ -42,6 +42,9 @@ lerna-debug.log*
 .env.production.local
 .env.local
 .env*
+!.env.example
+!.env.local.example
+!.env.render.example
 
 # temp directory
 .temp
@@ -57,12 +60,3 @@ pids
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 /generated/prisma
-prisma/migrations/*
-!prisma/migrations/20260312183000_wallet_settlement_foundation/
-!prisma/migrations/20260312183000_wallet_settlement_foundation/migration.sql
-!prisma/migrations/20260325123000_qoreid_wallet_contract/
-!prisma/migrations/20260325123000_qoreid_wallet_contract/migration.sql
-!prisma/migrations/20260327113000_alat_business_id/
-!prisma/migrations/20260327113000_alat_business_id/migration.sql
-!prisma/migrations/20260327150000_qoreid_pending_provider/
-!prisma/migrations/20260327150000_qoreid_pending_provider/migration.sql

@@ -41,6 +41,7 @@ import { validateEnvironment } from './config/runtime-env';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true, // <--- makes ConfigService available app-wide
+      envFilePath: ['.env.local', '.env'],
       validate: validateEnvironment,
     }),
     ScheduleModule.forRoot(),
