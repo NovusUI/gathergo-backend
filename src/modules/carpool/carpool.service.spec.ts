@@ -12,9 +12,15 @@ describe('CarpoolService', () => {
   const prismaMock = {
     carpool: {
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
       findMany: jest.fn(),
       update: jest.fn(),
     },
+    carpoolPassenger: {
+      findFirst: jest.fn(),
+      count: jest.fn(),
+    },
+    $queryRawUnsafe: jest.fn(),
   };
 
   const messageServiceMock = {
@@ -36,6 +42,7 @@ describe('CarpoolService', () => {
   const baseCarpool = {
     id: 'carpool-1',
     driverId: 'driver-1',
+    eventId: null,
     origin: 'Yaba Bus Stop',
     destination: null,
     departureTime: '17:00',
@@ -56,10 +63,13 @@ describe('CarpoolService', () => {
       imageUrl: 'https://example.com/event.png',
     },
     passengers: [{ userId: 'passenger-1' }],
+    _count: {
+      passengers: 1,
+    },
   };
 
   beforeEach(async () => {
-    jest.clearAllMocks();
+    jest.resetAllMocks();
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -191,5 +201,112 @@ describe('CarpoolService', () => {
     expect(messageServiceMock.createMessage).not.toHaveBeenCalled();
     expect(notificationServiceMock.createNotification).not.toHaveBeenCalled();
     expect(pubsubServiceMock.publishCarpoolUpdate).not.toHaveBeenCalled();
+  });
+
+  it('requests a ride without start point coordinates', async () => {
+    prismaMock.carpool.findUnique.mockResolvedValue({
+      ...baseCarpool,
+      availableSeats: 3,
+      _count: {
+        passengers: 0,
+      },
+    });
+    prismaMock.carpoolPassenger.findFirst.mockResolvedValue(null);
+    prismaMock.carpoolPassenger.count.mockResolvedValue(0);
+    prismaMock.$queryRawUnsafe.mockResolvedValue([
+      {
+        id: 'passenger-request-1',
+        userId: 'passenger-1',
+        carpoolId: 'carpool-1',
+        note: null,
+        status: 'PENDING',
+        origin: 'Wawa',
+        startPoint: null,
+        requestedAt: new Date('2099-01-01T12:00:00.000Z'),
+        estimatedDistance: null,
+      },
+    ]);
+
+    const result = await service.requestRide(
+      'passenger-1',
+      'carpool-1',
+      {
+        origin: 'Wawa',
+      },
+      'deybee',
+    );
+
+    expect(result).toEqual({
+      success: true,
+      data: expect.objectContaining({
+        id: 'passenger-request-1',
+        origin: 'Wawa',
+        startPoint: null,
+        estimatedDistance: null,
+      }),
+    });
+    expect(prismaMock.$queryRawUnsafe).toHaveBeenCalledTimes(1);
+
+    const [sql, ...params] = prismaMock.$queryRawUnsafe.mock.calls[0];
+    expect(sql).toContain('NULL');
+    expect(sql).toContain('$5');
+    expect(sql).not.toContain('$6');
+    expect(sql).not.toContain('$7');
+    expect(params).toEqual(['passenger-1', 'carpool-1', null, 'Wawa', null]);
+  });
+
+  it('requests a ride with start point coordinates', async () => {
+    prismaMock.carpool.findUnique.mockResolvedValue({
+      ...baseCarpool,
+      availableSeats: 3,
+      _count: {
+        passengers: 0,
+      },
+    });
+    prismaMock.carpoolPassenger.findFirst.mockResolvedValue(null);
+    prismaMock.carpoolPassenger.count.mockResolvedValue(0);
+    prismaMock.$queryRawUnsafe
+      .mockResolvedValueOnce([{ distance: 2500 }])
+      .mockResolvedValueOnce([
+        {
+          id: 'passenger-request-1',
+          userId: 'passenger-1',
+          carpoolId: 'carpool-1',
+          note: null,
+          status: 'PENDING',
+          origin: 'Wawa',
+          startPoint: 'POINT(3.1 6.2)',
+          requestedAt: new Date('2099-01-01T12:00:00.000Z'),
+          estimatedDistance: '2.5 km',
+        },
+      ]);
+
+    await service.requestRide(
+      'passenger-1',
+      'carpool-1',
+      {
+        origin: 'Wawa',
+        startPoint: {
+          lng: 3.1,
+          lat: 6.2,
+        },
+      },
+      'deybee',
+    );
+
+    expect(prismaMock.$queryRawUnsafe).toHaveBeenCalledTimes(2);
+
+    const [sql, ...params] = prismaMock.$queryRawUnsafe.mock.calls[1];
+    expect(sql).toContain('ST_SetSRID(ST_MakePoint($5, $6), 4326)');
+    expect(sql).toContain('$7');
+    expect(params).toEqual([
+      'passenger-1',
+      'carpool-1',
+      null,
+      'Wawa',
+      3.1,
+      6.2,
+      '2.5 km',
+    ]);
   });
 });

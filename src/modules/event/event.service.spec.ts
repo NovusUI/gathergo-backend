@@ -6,6 +6,9 @@ describe('EventService', () => {
     event: {
       findUnique: jest.fn(),
     },
+    eventImpactReport: {
+      upsert: jest.fn(),
+    },
     $transaction: jest.fn(),
   } as any;
   const queueService = {
@@ -39,6 +42,7 @@ describe('EventService', () => {
       thumbnailUrl: null,
     };
     const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'event-1' }]),
       event: {
         update: jest.fn().mockResolvedValue({
           ...existingEvent,
@@ -54,7 +58,9 @@ describe('EventService', () => {
     };
 
     prisma.event.findUnique.mockResolvedValue(existingEvent);
-    prisma.$transaction.mockImplementation(async (callback: any) => callback(tx));
+    prisma.$transaction.mockImplementation(async (callback: any) =>
+      callback(tx),
+    );
 
     await service.update('user-1', 'event-1', {
       title: 'Updated title',
@@ -71,6 +77,7 @@ describe('EventService', () => {
   it('normalizes event links on create and update', async () => {
     const createdEvent = { id: 'event-2' };
     const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'event-1' }]),
       event: {
         create: jest.fn().mockResolvedValue(createdEvent),
         update: jest.fn().mockResolvedValue(createdEvent),
@@ -83,7 +90,9 @@ describe('EventService', () => {
       },
     };
 
-    prisma.$transaction.mockImplementation(async (callback: any) => callback(tx));
+    prisma.$transaction.mockImplementation(async (callback: any) =>
+      callback(tx),
+    );
     prisma.event.findUnique.mockResolvedValue({
       id: 'event-2',
       creatorId: 'user-1',
@@ -101,11 +110,7 @@ describe('EventService', () => {
       donationTarget: 500000,
       startDate: '2026-04-01T10:00:00.000Z',
       endDate: '2026-04-02T10:00:00.000Z',
-      links: [
-        ' wa.me/1234567890 ',
-        '',
-        'x.com/gathergo',
-      ],
+      links: [' wa.me/1234567890 ', '', 'x.com/gathergo'],
     } as any);
 
     expect(tx.event.create).toHaveBeenCalledWith(
@@ -127,5 +132,104 @@ describe('EventService', () => {
         }),
       }),
     );
+  });
+
+  it('submits a post-event impact report for the event creator', async () => {
+    const report = { id: 'report-1', eventId: 'event-1' };
+
+    prisma.event.findUnique.mockResolvedValue({
+      id: 'event-1',
+      creatorId: 'user-1',
+      endDate: new Date('2020-01-01T10:00:00.000Z'),
+    });
+    prisma.eventImpactReport.upsert.mockResolvedValue(report);
+
+    const result = await service.upsertImpactReport('user-1', 'event-1', {
+      summary: 'We planted trees and cleaned the community.',
+      outcomes: [
+        {
+          type: 'trees_planted',
+          label: 'Trees planted',
+          value: 25,
+          unit: 'trees',
+          note: 'Seedlings planted along the community road.',
+        },
+      ],
+      evidenceLinks: [' instagram.com/gathergo '],
+    });
+
+    expect(result).toBe(report);
+    expect(prisma.eventImpactReport.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { eventId: 'event-1' },
+        create: expect.objectContaining({
+          eventId: 'event-1',
+          creatorId: 'user-1',
+          summary: 'We planted trees and cleaned the community.',
+          evidenceLinks: ['https://instagram.com/gathergo'],
+          outcomes: [
+            expect.objectContaining({
+              type: 'trees_planted',
+              label: 'Trees planted',
+              value: 25,
+              unit: 'trees',
+            }),
+          ],
+        }),
+        update: expect.objectContaining({
+          summary: 'We planted trees and cleaned the community.',
+        }),
+      }),
+    );
+  });
+
+  it('blocks impact reports from non-creators', async () => {
+    prisma.event.findUnique.mockResolvedValue({
+      id: 'event-1',
+      creatorId: 'creator-1',
+      endDate: new Date('2020-01-01T10:00:00.000Z'),
+    });
+
+    await expect(
+      service.upsertImpactReport('user-1', 'event-1', {
+        summary: 'We planted trees and cleaned the community.',
+        outcomes: [
+          {
+            type: 'trees_planted',
+            label: 'Trees planted',
+            value: 25,
+            unit: 'trees',
+          },
+        ],
+      }),
+    ).rejects.toThrow('Only the event creator can report impact');
+
+    expect(prisma.eventImpactReport.upsert).not.toHaveBeenCalled();
+  });
+
+  it('blocks impact reports before the event ends', async () => {
+    prisma.event.findUnique.mockResolvedValue({
+      id: 'event-1',
+      creatorId: 'user-1',
+      endDate: new Date(Date.now() + 60 * 60 * 1000),
+    });
+
+    await expect(
+      service.upsertImpactReport('user-1', 'event-1', {
+        summary: 'We planted trees and cleaned the community.',
+        outcomes: [
+          {
+            type: 'trees_planted',
+            label: 'Trees planted',
+            value: 25,
+            unit: 'trees',
+          },
+        ],
+      }),
+    ).rejects.toThrow(
+      'Impact report can only be submitted after the event has ended',
+    );
+
+    expect(prisma.eventImpactReport.upsert).not.toHaveBeenCalled();
   });
 });

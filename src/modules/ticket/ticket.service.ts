@@ -1,9 +1,15 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import {
+  IssuanceTransaction,
+  PurchasedTicketItem,
+} from '../checkout/checkout.types';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { generateOpaqueCode } from 'src/common/utils/generate-opaque-code.util';
 import { NotificationService } from '../notification/notification.service';
@@ -22,165 +28,108 @@ export class TicketService {
     private readonly mailService: MailService,
   ) {}
 
-  async create(
-    transaction: any,
-    paidTickets: any[],
-    eventId: string,
-    username?: string,
+  async planIssuance(
+    tx: Prisma.TransactionClient,
+    transactionId: string,
+    items: PurchasedTicketItem[],
   ) {
-    const purchaser = await this.resolvePurchaser(transaction);
-    const saleActorName =
-      username ||
-      purchaser?.username ||
-      purchaser?.fullName ||
-      purchaser?.email?.split('@')[0] ||
-      'customer';
-    const unavailableTickets: {
-      id: string;
-      reason: string;
-      ticketName: string;
-    }[] = [];
+    const existing = await tx.ticket.findMany({ where: { transactionId } });
+    return items.map((item) => {
+      const alreadyIssued = existing.filter(
+        (ticket) => ticket.eventTicketId === item.eventTicketId,
+      ).length;
+      if (alreadyIssued > item.quantity)
+        throw new ConflictException(
+          'Existing tickets exceed the checkout quantity; this purchase needs review.',
+        );
+      return {
+        ...item,
+        alreadyIssued,
+        quantityToIssue: item.quantity - alreadyIssued,
+      };
+    });
+  }
 
-    const ticketPurchaseFeedItems: {
-      eventTicketId: string;
-      ticketIds: string[];
-      quantity: number;
-    }[] = [];
-    for (const item of paidTickets) {
-      const eventTicket = await this.prisma.eventTicket.findUnique({
-        where: { id: item.eventTicketId },
-        include: {
-          event: {
-            select: {
-              id: true,
-              title: true,
-              startDate: true,
-              location: true,
-              thumbnailUrl: true,
-              creatorId: true,
+  async issue(
+    tx: Prisma.TransactionClient,
+    transaction: IssuanceTransaction,
+    plan: Awaited<ReturnType<TicketService['planIssuance']>>,
+  ) {
+    const data = plan.flatMap((item) =>
+      Array.from({ length: item.quantityToIssue }, (_, index) => ({
+        eventTicketId: item.eventTicketId,
+        userId: transaction.userId,
+        transactionId: transaction.id,
+        qrCode: generateOpaqueCode(16),
+        fulfillmentKey: `${transaction.id}:${item.eventTicketId}:${item.alreadyIssued + index + 1}`,
+      })),
+    );
+    if (data.length > 0) await tx.ticket.createMany({ data });
+    return tx.ticket.findMany({ where: { transactionId: transaction.id } });
+  }
+
+  async notifyPurchase(transactionId: string) {
+    const tickets = await this.prisma.ticket.findMany({
+      where: { transactionId },
+      include: {
+        user: { select: { email: true, username: true, fullName: true } },
+        eventTicket: {
+          include: {
+            event: {
+              select: {
+                id: true,
+                title: true,
+                startDate: true,
+                location: true,
+                thumbnailUrl: true,
+                creatorId: true,
+              },
             },
           },
         },
-      });
-
-      if (!eventTicket) {
-        unavailableTickets.push({
-          id: item.eventTicketId,
-          reason: 'Ticket not found during verification',
-          ticketName: item.ticketName,
-        });
-        continue;
-      }
-
-      const availableStock = Math.max(eventTicket.quantity - eventTicket.sold, 0);
-      const availableQty = Math.min(item.quantity, availableStock);
-
-      if (availableQty === 0) {
-        unavailableTickets.push({
-          id: item.eventTicketId,
-          reason: 'Out of stock during verification',
-          ticketName: item.ticketName,
-        });
-        continue;
-      }
-
-      // Create tickets
-      await this.prisma.ticket.createMany({
-        data: Array.from({ length: availableQty }).map(() => ({
-          eventTicketId: item.eventTicketId,
-          userId: transaction.userId,
-          qrCode: generateOpaqueCode(16),
-          transactionId: transaction.id,
-        })),
-      });
-
-      // Get the created ticket IDs
-      const createdTickets = await this.prisma.ticket.findMany({
-        where: {
-          eventTicketId: item.eventTicketId,
-          userId: transaction.userId,
-          transactionId: transaction.id,
-        },
-        orderBy: { createdAt: 'desc' },
-        take: availableQty,
-      });
-
-      if (createdTickets.length > 0) {
-        ticketPurchaseFeedItems.push({
-          eventTicketId: item.eventTicketId,
-          ticketIds: createdTickets.map((ticket) => ticket.id),
-          quantity: createdTickets.length,
-        });
-      }
-
-      // Update stock
-      await this.prisma.eventTicket.update({
-        where: { id: item.eventTicketId },
-        data: { sold: { increment: availableQty } },
-      });
-
-      await Promise.all(
-        createdTickets.map((ticket) =>
-          this.queueTicketConfirmationEmail({
-            purchaser,
-            eventTicket,
-            ticket,
-          }),
-        ),
-      );
-
-      if (availableQty < item.quantity) {
-        unavailableTickets.push({
-          id: item.eventTicketId,
-          reason: `Only ${availableQty} issued out of ${item.quantity} requested`,
-          ticketName: item.ticketName,
-        });
-      }
+      },
+    });
+    if (tickets.length === 0) return;
+    const { eventTicket, user } = tickets[0];
+    const groups = new Map<
+      string,
+      { eventTicketId: string; ticketIds: string[]; quantity: number }
+    >();
+    for (const ticket of tickets) {
+      const group = groups.get(ticket.eventTicketId) ?? {
+        eventTicketId: ticket.eventTicketId,
+        ticketIds: [],
+        quantity: 0,
+      };
+      group.ticketIds.push(ticket.id);
+      group.quantity += 1;
+      groups.set(ticket.eventTicketId, group);
     }
-
-    if (ticketPurchaseFeedItems.length > 0) {
-      try {
-        await this.feedIntegrationService.onTicketPurchaseBatch(
-          eventId,
-          transaction.userId,
-          ticketPurchaseFeedItems,
-        );
-      } catch (error) {
-        const reason =
-          error instanceof Error ? error.message : 'unknown feed error';
-        this.logger.warn(
-          `Failed to generate ticket purchase feed for event ${eventId}: ${reason}`,
-        );
-      }
-    }
-
-    try {
-      const event = await this.prisma.event.findUnique({
-        where: {
-          id: eventId,
-        },
-      });
-
-      if (!event) {
-        throw new NotFoundException('event not found');
-      }
-
-      this.notificationService
-        .createNotification({
-          recipientIds: [event.creatorId],
-          title: notificationConstants.EVENT_TICKET_SALE_TITLE,
-          message: notificationConstants.EVENT_TICKET_SALE_MESSAGE(saleActorName),
-          type: notificationConstants.EVENT_TICKET_SALE,
-          imageUrl: event.thumbnailUrl || '',
-          data: {
-            eventId,
-          },
-          link: '/event/' + eventId,
-        })
-        .then(() => {});
-
-      return unavailableTickets;
-    } catch (error) {}
+    await this.feedIntegrationService.onTicketPurchaseBatch(
+      eventTicket.event.id,
+      tickets[0].userId,
+      Array.from(groups.values()),
+    );
+    await this.notificationService.createNotification({
+      recipientIds: [eventTicket.event.creatorId],
+      title: notificationConstants.EVENT_TICKET_SALE_TITLE,
+      message: notificationConstants.EVENT_TICKET_SALE_MESSAGE(
+        this.resolveDisplayName(user),
+      ),
+      type: notificationConstants.EVENT_TICKET_SALE,
+      imageUrl: eventTicket.event.thumbnailUrl || '',
+      data: { eventId: eventTicket.event.id },
+      link: '/event/' + eventTicket.event.id,
+    });
+    await Promise.all(
+      tickets.map((ticket) =>
+        this.queueTicketConfirmationEmail({
+          purchaser: ticket.user,
+          eventTicket: ticket.eventTicket,
+          ticket,
+        }),
+      ),
+    );
   }
 
   private async queueTicketConfirmationEmail(input: {
@@ -215,6 +164,7 @@ export class TicketService {
     try {
       const result = await this.mailService.sendTicketConfirmation({
         to: purchaser.email,
+        jobId: `ticket-confirmation-${ticket.id}`,
         name: this.resolveDisplayName(purchaser),
         eventTitle: eventTicket.event.title,
         eventDate: eventTicket.event.startDate.toLocaleDateString(),
@@ -238,26 +188,8 @@ export class TicketService {
       this.logger.warn(
         `Failed to queue ticket confirmation email for ${purchaser.email}: ${reason}`,
       );
+      throw error;
     }
-  }
-
-  private async resolvePurchaser(transaction: any) {
-    if (transaction?.user?.email) {
-      return transaction.user;
-    }
-
-    if (!transaction?.userId) {
-      return null;
-    }
-
-    return this.prisma.user.findUnique({
-      where: { id: transaction.userId },
-      select: {
-        email: true,
-        username: true,
-        fullName: true,
-      },
-    });
   }
 
   private resolveDisplayName(user: {

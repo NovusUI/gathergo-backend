@@ -14,11 +14,13 @@ import {
   PaymentType,
   Prisma,
   RiskStatus,
+  VerificationProvider,
   SettlementRecordStatus,
   SettlementStatus,
   TransactionStatusType,
 } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { PaystackService } from 'src/modules/paystack/paystack.service';
 import { calculatePlatformFeeKobo } from 'src/modules/transaction-reference/payment-pricing.util';
 import {
   AccountChangesQueryDto,
@@ -27,11 +29,13 @@ import {
   CreatorPayoutProfileStatusDto,
   InternalAlatQueueQueryDto,
   InternalKycQueueQueryDto,
+  KycTierDto,
   KycResolutionNotificationTargetDto,
   NotifyOnKycResolutionDto,
   PersonalLivenessDto,
   ReviewKycDto,
   ReviewPayoutProfileDto,
+  ResolvePayoutAccountDto,
   StartBusinessKycDto,
   StartBusinessRepresentativeKycDto,
   StartPersonalKycDto,
@@ -45,23 +49,54 @@ import {
 import { notificationConstants } from 'src/common/constants';
 import { NotificationService } from 'src/modules/notification/notification.service';
 import {
-  QoreIdCacResponse,
-  QoreIdFaceVerificationResponse,
-  QoreIdNinResponse,
-  QoreIdNubanResponse,
-  QoreIdService,
-} from './qoreid.service';
+  DikriptCacResponse,
+  DikriptFaceVerificationResponse,
+  DikriptNinResponse,
+  DikriptService,
+} from './dikript.service';
+
+const KYC_PROVIDER_DIKRIPT = VerificationProvider.DIKRIPT;
+const BASIC_KYC_SETTLEMENT_CAP_NAIRA = Number(
+  process.env.BASIC_KYC_SETTLEMENT_CAP_NGN || 5_000_000,
+);
+const BASIC_KYC_SETTLEMENT_CAP_KOBO =
+  Math.max(BASIC_KYC_SETTLEMENT_CAP_NAIRA, 0) * 100;
+type KycTier = KycTierDto.NONE | KycTierDto.BASIC | KycTierDto.FULL;
+
+type KycTierSummary = {
+  kycTier: KycTier;
+  basicKycSettlementCap: number;
+  basicKycSettlementUsage: number;
+  basicKycSettlementRemaining: number;
+  livenessRequired: boolean;
+  livenessRequiredReason: string | null;
+};
 
 @Injectable()
 export class WalletService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly qoreIdService: QoreIdService,
+    private readonly dikriptService: DikriptService,
+    private readonly paystackService: PaystackService,
     private readonly notificationService: NotificationService,
   ) {}
 
   async getWalletOverview(userId: string) {
     await this.backfillCreatorTransactions(userId);
+    const currentPayoutProfile =
+      await this.prisma.creatorSettlementProfile.findUnique({
+        where: { userId },
+        select: { status: true },
+      });
+
+    if (
+      currentPayoutProfile?.status === CreatorSettlementProfileStatus.ACTIVE
+    ) {
+      await this.syncCreatorSettlementStatus(
+        userId,
+        currentPayoutProfile.status,
+      );
+    }
 
     const [
       payoutProfile,
@@ -211,8 +246,14 @@ export class WalletService {
       alatProfile?.status || CreatorAlatProfileStatus.NOT_STARTED;
     const canReceiveSettlement =
       payoutStatus === CreatorSettlementProfileStatus.ACTIVE;
+    const tierSummary = await this.getKycTierSummary(
+      userId,
+      kycVerification,
+      payoutProfile,
+    );
     const canOfferAlatTransfer =
       canReceiveSettlement &&
+      tierSummary.kycTier === KycTierDto.FULL &&
       alatStatus === CreatorAlatProfileStatus.ACTIVE &&
       Boolean(alatProfile?.businessId);
 
@@ -221,6 +262,8 @@ export class WalletService {
       kycStatus,
       alatStatus,
       Boolean(alatProfile?.businessId),
+      tierSummary.livenessRequired,
+      tierSummary.kycTier,
     );
     const nextAction =
       tasks.find((task) => task.status === 'PENDING')?.code || null;
@@ -238,6 +281,7 @@ export class WalletService {
       payoutProfileStatus: payoutStatus,
       kycStatus,
       alatProfileStatus: alatStatus,
+      ...tierSummary,
     };
   }
 
@@ -256,28 +300,33 @@ export class WalletService {
       payoutProfile?.accountOwnershipType ||
       AccountOwnershipType.UNKNOWN;
 
+    const verification = kycVerification || {
+      status: this.deriveKycStatusFromPayoutProfile(payoutProfile),
+      accountOwnershipType,
+      verificationMode: null,
+      businessStatus:
+        accountOwnershipType === AccountOwnershipType.BUSINESS
+          ? this.deriveKycStatusFromPayoutProfile(payoutProfile)
+          : KycVerificationStatus.NOT_STARTED,
+      identityStatus: this.deriveKycStatusFromPayoutProfile(payoutProfile),
+      livenessStatus: this.deriveKycStatusFromPayoutProfile(payoutProfile),
+      amlStatus: this.deriveKycStatusFromPayoutProfile(payoutProfile),
+      dedupStatus: KycVerificationStatus.NOT_STARTED,
+      nameMatchStatus:
+        payoutProfile?.nameMatchStatus ||
+        (payoutProfile?.status === CreatorSettlementProfileStatus.ACTIVE
+          ? NameMatchStatus.MATCHED
+          : NameMatchStatus.NOT_CHECKED),
+      verifiedFullName: null,
+      verifiedBusinessName: null,
+      rejectionReason: null,
+      metadata: {},
+    };
+
     return this.formatKyc(
-      kycVerification || {
-        status: this.deriveKycStatusFromPayoutProfile(payoutProfile),
-        accountOwnershipType,
-        verificationMode: null,
-        businessStatus:
-          accountOwnershipType === AccountOwnershipType.BUSINESS
-            ? this.deriveKycStatusFromPayoutProfile(payoutProfile)
-            : KycVerificationStatus.NOT_STARTED,
-        identityStatus: this.deriveKycStatusFromPayoutProfile(payoutProfile),
-        livenessStatus: this.deriveKycStatusFromPayoutProfile(payoutProfile),
-        amlStatus: this.deriveKycStatusFromPayoutProfile(payoutProfile),
-        dedupStatus: KycVerificationStatus.NOT_STARTED,
-        nameMatchStatus:
-          payoutProfile?.nameMatchStatus ||
-          (payoutProfile?.status === CreatorSettlementProfileStatus.ACTIVE
-            ? NameMatchStatus.MATCHED
-            : NameMatchStatus.NOT_CHECKED),
-        verifiedFullName: null,
-        verifiedBusinessName: null,
-        rejectionReason: null,
-      },
+      verification,
+      payoutProfile,
+      await this.getKycTierSummary(userId, verification, payoutProfile),
     );
   }
 
@@ -307,16 +356,40 @@ export class WalletService {
   }
 
   async getBanks() {
-    const banks = await this.qoreIdService.getNubanBanks();
+    const response = await this.paystackService.listBanks('nigeria');
 
     return {
-      data: Array.isArray(banks)
-        ? banks.map((bank) => ({
-            name: bank.name || null,
-            code: bank.code || null,
-            longcode: bank.longcode || null,
-          }))
-        : [],
+      data: response.data.map((bank) => ({
+        name: bank.name,
+        code: bank.code,
+        longcode: bank.longcode,
+      })),
+    };
+  }
+
+  async resolvePayoutAccount(userId: string, dto: ResolvePayoutAccountDto) {
+    const normalizedBankCode = this.normalizeBankCode(dto.bankCode);
+    const normalizedAccountNumber = this.normalizePayoutAccountNumber(
+      dto.accountNumber,
+    );
+
+    const payoutAccount = this.resolveValidPayoutAccountDetails(
+      normalizedBankCode,
+      normalizedAccountNumber,
+    );
+    await this.assertNoDuplicatePayoutAccount(
+      userId,
+      payoutAccount.bankCode,
+      payoutAccount.accountNumber,
+    );
+
+    const resolvedAccount = await this.resolvePayoutAccountWithPaystack(
+      payoutAccount.bankCode,
+      payoutAccount.accountNumber,
+    );
+
+    return {
+      data: resolvedAccount,
     };
   }
 
@@ -350,7 +423,11 @@ export class WalletService {
           },
           settlementProfile: true,
         },
-        orderBy: [{ reviewedAt: 'asc' }, { submittedAt: 'asc' }, { updatedAt: 'desc' }],
+        orderBy: [
+          { reviewedAt: 'asc' },
+          { submittedAt: 'asc' },
+          { updatedAt: 'desc' },
+        ],
         skip,
         take: pageSize,
       }),
@@ -501,7 +578,9 @@ export class WalletService {
     ]);
 
     return {
-      data: creators.map((creator) => this.formatInternalAlatQueueItem(creator)),
+      data: creators.map((creator) =>
+        this.formatInternalAlatQueueItem(creator),
+      ),
       total,
       page,
       pageSize,
@@ -514,18 +593,28 @@ export class WalletService {
     };
   }
 
-  async handleQoreIdWebhook(payload: any, signature: string, rawBody?: Buffer) {
-    const isValid = this.qoreIdService.verifyWebhookSignature(
+  async handleDikriptWebhook(
+    payload: any,
+    signature: string,
+    rawBody?: Buffer,
+  ) {
+    const isValid = this.dikriptService.verifyWebhookSignature(
       payload || {},
       rawBody,
       signature,
     );
 
     if (!isValid) {
-      throw new UnauthorizedException('Invalid QoreID webhook signature');
+      throw new UnauthorizedException('Invalid Dikript webhook signature');
     }
 
-    const requestId = payload?.data?.id;
+    const requestId =
+      payload?.data?.id ||
+      payload?.data?.transactionRef ||
+      payload?.transactionRef ||
+      payload?.dikriptTransactionRef ||
+      payload?.sessionId ||
+      payload?.sessionToken;
     if (!requestId) {
       return { received: true, processed: false };
     }
@@ -555,7 +644,7 @@ export class WalletService {
         !Array.isArray(verification.metadata)
           ? (verification.metadata as Record<string, any>)
           : {}),
-        lastWebhook: this.summarizeQoreWebhookPayload(payload),
+        lastWebhook: this.summarizeDikriptWebhookPayload(payload),
       },
     };
     const payoutUpdate: Prisma.CreatorSettlementProfileUpdateInput = {};
@@ -576,12 +665,12 @@ export class WalletService {
     ) {
       if (
         isIdentityRequest &&
-        this.extractIdentityRecord(payload?.data as QoreIdNinResponse)
+        this.extractIdentityRecord(payload?.data as DikriptNinResponse)
       ) {
-        const identityResponse = payload.data as QoreIdNinResponse;
+        const identityResponse = payload.data as DikriptNinResponse;
         const identityRecord = this.extractIdentityRecord(identityResponse);
         const identityStatus =
-          this.resolveQoreIdIdentityStatus(identityResponse);
+          this.resolveDikriptIdentityStatus(identityResponse);
         const verifiedFullName = this.combineNameParts(
           identityRecord?.firstname,
           identityRecord?.middlename,
@@ -606,6 +695,8 @@ export class WalletService {
           businessReferenceHash: verification.businessReferenceHash || null,
           nameDobHash: this.hashNameDob(verifiedFullName, verifiedDateOfBirth),
         });
+        let resolvedNameMatchStatus = verification.nameMatchStatus;
+        let resolvedNameMatchReason = verification.nameMatchReason;
 
         updateData.identityStatus = identityStatus;
         updateData.status = nextWorkflowStatus;
@@ -622,21 +713,109 @@ export class WalletService {
           ...((updateData.metadata as Record<string, any>) || {}),
           dedupReview: duplicateReview.metadata,
         };
+        if (
+          identityStatus === KycVerificationStatus.VERIFIED &&
+          verification.accountOwnershipType === AccountOwnershipType.PERSONAL
+        ) {
+          const nameMatch = this.evaluateSettlementNameMatch({
+            accountOwnershipType: AccountOwnershipType.PERSONAL,
+            accountName: verification.settlementProfile?.accountName,
+            verifiedFullName,
+            verifiedBusinessName: null,
+          });
+          updateData.nameMatchStatus = nameMatch.status;
+          updateData.nameMatchScore = nameMatch.score;
+          updateData.nameMatchReason = nameMatch.reason;
+          resolvedNameMatchStatus = nameMatch.status;
+          resolvedNameMatchReason = nameMatch.reason;
+          payoutUpdate.nameMatchStatus = nameMatch.status;
+          payoutUpdate.rejectionReason =
+            nameMatch.status === NameMatchStatus.MISMATCH
+              ? 'Payout account name does not match verified identity'
+              : nextPayoutState.rejectionReason;
+        }
         updateData.rejectionReason =
           identityStatus === KycVerificationStatus.REJECTED
-            ? 'QoreID webhook reported failed identity verification'
+            ? 'Dikript webhook reported failed identity verification'
             : null;
+        const basicAutoApproved =
+          verification.accountOwnershipType === AccountOwnershipType.PERSONAL &&
+          this.canAutoApproveKycTier({
+            targetTier: KycTierDto.BASIC,
+            accountOwnershipType: AccountOwnershipType.PERSONAL,
+            identityStatus,
+            nameMatchStatus: resolvedNameMatchStatus,
+            dedupStatus: duplicateReview.status,
+          });
+        const manualReviewReason =
+          verification.accountOwnershipType === AccountOwnershipType.PERSONAL &&
+          identityStatus === KycVerificationStatus.VERIFIED &&
+          !basicAutoApproved
+            ? this.getKycManualReviewReason({
+                nameMatchStatus: resolvedNameMatchStatus,
+                nameMatchReason: resolvedNameMatchReason,
+                duplicateReason: duplicateReview.reason,
+                mismatchReason:
+                  'Payout account name does not match verified identity',
+                reviewReason:
+                  'Payout account name needs manual review before Basic KYC can be approved.',
+              })
+            : null;
+        const resolvedPayoutState = basicAutoApproved
+          ? {
+              kycStatus: KycVerificationStatus.VERIFIED,
+              profileStatus: CreatorSettlementProfileStatus.ACTIVE,
+              rejectionReason: null,
+            }
+          : manualReviewReason
+            ? {
+                kycStatus: KycVerificationStatus.SUBMITTED,
+                profileStatus: CreatorSettlementProfileStatus.REVIEW_REQUIRED,
+                rejectionReason: manualReviewReason,
+              }
+            : nextPayoutState;
 
-        payoutUpdate.kycStatus = nextPayoutState.kycStatus;
-        payoutUpdate.status = nextPayoutState.profileStatus;
-        payoutUpdate.rejectionReason = nextPayoutState.rejectionReason;
+        if (basicAutoApproved || manualReviewReason) {
+          const approvedTier = basicAutoApproved
+            ? KycTierDto.BASIC
+            : KycTierDto.NONE;
+
+          updateData.status = basicAutoApproved
+            ? KycVerificationStatus.VERIFIED
+            : KycVerificationStatus.SUBMITTED;
+          updateData.submittedAt = manualReviewReason ? new Date() : null;
+          updateData.reviewedAt = null;
+          updateData.rejectionReason = manualReviewReason;
+          updateData.metadata = {
+            ...this.normalizeJsonObject(updateData.metadata),
+            kycTier: approvedTier,
+            approvedTier,
+            targetTier: KycTierDto.BASIC,
+          };
+          payoutUpdate.approvedAt = basicAutoApproved
+            ? verification.settlementProfile?.approvedAt || new Date()
+            : null;
+          payoutUpdate.rejectedAt = null;
+          payoutUpdate.metadata = {
+            ...this.normalizeJsonObject(
+              verification.settlementProfile?.metadata,
+            ),
+            kycTier: approvedTier,
+            approvedTier,
+          };
+        }
+
+        payoutUpdate.kycStatus = resolvedPayoutState.kycStatus;
+        payoutUpdate.status = resolvedPayoutState.profileStatus;
+        payoutUpdate.rejectionReason =
+          payoutUpdate.rejectionReason ?? resolvedPayoutState.rejectionReason;
         resolvedNotificationTarget =
           KycResolutionNotificationTargetDto.IDENTITY;
         resolvedNotificationStatus = identityStatus;
       } else if (payload?.data?.cac && isBusinessRequest) {
-        const businessResponse = payload.data as QoreIdCacResponse;
+        const businessResponse = payload.data as DikriptCacResponse;
         const businessStatus =
-          this.resolveQoreIdBusinessStatus(businessResponse);
+          this.resolveDikriptBusinessStatus(businessResponse);
         const nextWorkflowStatus = this.deriveVerificationWorkflowStatus({
           accountOwnershipType: verification.accountOwnershipType,
           businessStatus,
@@ -652,27 +831,117 @@ export class WalletService {
           businessReferenceHash: this.hashKycSubject(businessReference),
           providerSubjectHash: verification.providerSubjectHash || null,
         });
+        let resolvedNameMatchStatus = verification.nameMatchStatus;
+        let resolvedNameMatchReason = verification.nameMatchReason;
 
         updateData.businessStatus = businessStatus;
         updateData.status = nextWorkflowStatus;
-        updateData.businessReferenceHash = this.hashKycSubject(businessReference);
+        updateData.businessReferenceHash =
+          this.hashKycSubject(businessReference);
         updateData.businessReferenceLast4 = this.getLast4(businessReference);
         updateData.dedupStatus = duplicateReview.status;
         updateData.verifiedBusinessName =
           businessResponse.cac?.companyName ||
           verification.verifiedBusinessName;
+        if (businessStatus === KycVerificationStatus.VERIFIED) {
+          const nameMatch = this.evaluateSettlementNameMatch({
+            accountOwnershipType: AccountOwnershipType.BUSINESS,
+            accountName: verification.settlementProfile?.accountName,
+            verifiedFullName: null,
+            verifiedBusinessName:
+              businessResponse.cac?.companyName ||
+              verification.verifiedBusinessName,
+          });
+          updateData.nameMatchStatus = nameMatch.status;
+          updateData.nameMatchScore = nameMatch.score;
+          updateData.nameMatchReason = nameMatch.reason;
+          resolvedNameMatchStatus = nameMatch.status;
+          resolvedNameMatchReason = nameMatch.reason;
+          payoutUpdate.nameMatchStatus = nameMatch.status;
+          payoutUpdate.rejectionReason =
+            nameMatch.status === NameMatchStatus.MISMATCH
+              ? 'Payout account name does not match verified business'
+              : nextPayoutState.rejectionReason;
+        }
         updateData.metadata = {
           ...((updateData.metadata as Record<string, any>) || {}),
           dedupReview: duplicateReview.metadata,
         };
         updateData.rejectionReason =
           businessStatus === KycVerificationStatus.REJECTED
-            ? 'QoreID webhook reported failed business verification'
+            ? 'Dikript webhook reported failed business verification'
             : null;
+        const basicAutoApproved =
+          verification.accountOwnershipType === AccountOwnershipType.BUSINESS &&
+          this.canAutoApproveKycTier({
+            targetTier: KycTierDto.BASIC,
+            accountOwnershipType: AccountOwnershipType.BUSINESS,
+            businessStatus,
+            nameMatchStatus: resolvedNameMatchStatus,
+            dedupStatus: duplicateReview.status,
+          });
+        const manualReviewReason =
+          verification.accountOwnershipType === AccountOwnershipType.BUSINESS &&
+          businessStatus === KycVerificationStatus.VERIFIED &&
+          !basicAutoApproved
+            ? this.getKycManualReviewReason({
+                nameMatchStatus: resolvedNameMatchStatus,
+                nameMatchReason: resolvedNameMatchReason,
+                duplicateReason: duplicateReview.reason,
+                mismatchReason:
+                  'Payout account name does not match verified business',
+                reviewReason:
+                  'Payout account name needs manual review before Basic KYC can be approved.',
+              })
+            : null;
+        const resolvedPayoutState = basicAutoApproved
+          ? {
+              kycStatus: KycVerificationStatus.VERIFIED,
+              profileStatus: CreatorSettlementProfileStatus.ACTIVE,
+              rejectionReason: null,
+            }
+          : manualReviewReason
+            ? {
+                kycStatus: KycVerificationStatus.SUBMITTED,
+                profileStatus: CreatorSettlementProfileStatus.REVIEW_REQUIRED,
+                rejectionReason: manualReviewReason,
+              }
+            : nextPayoutState;
 
-        payoutUpdate.kycStatus = nextPayoutState.kycStatus;
-        payoutUpdate.status = nextPayoutState.profileStatus;
-        payoutUpdate.rejectionReason = nextPayoutState.rejectionReason;
+        if (basicAutoApproved || manualReviewReason) {
+          const approvedTier = basicAutoApproved
+            ? KycTierDto.BASIC
+            : KycTierDto.NONE;
+
+          updateData.status = basicAutoApproved
+            ? KycVerificationStatus.VERIFIED
+            : KycVerificationStatus.SUBMITTED;
+          updateData.submittedAt = manualReviewReason ? new Date() : null;
+          updateData.reviewedAt = null;
+          updateData.rejectionReason = manualReviewReason;
+          updateData.metadata = {
+            ...this.normalizeJsonObject(updateData.metadata),
+            kycTier: approvedTier,
+            approvedTier,
+            targetTier: KycTierDto.BASIC,
+          };
+          payoutUpdate.approvedAt = basicAutoApproved
+            ? verification.settlementProfile?.approvedAt || new Date()
+            : null;
+          payoutUpdate.rejectedAt = null;
+          payoutUpdate.metadata = {
+            ...this.normalizeJsonObject(
+              verification.settlementProfile?.metadata,
+            ),
+            kycTier: approvedTier,
+            approvedTier,
+          };
+        }
+
+        payoutUpdate.kycStatus = resolvedPayoutState.kycStatus;
+        payoutUpdate.status = resolvedPayoutState.profileStatus;
+        payoutUpdate.rejectionReason =
+          payoutUpdate.rejectionReason ?? resolvedPayoutState.rejectionReason;
         resolvedNotificationTarget =
           KycResolutionNotificationTargetDto.BUSINESS;
         resolvedNotificationStatus = businessStatus;
@@ -685,8 +954,8 @@ export class WalletService {
         payload?.data?.summary?.face_verification_check)
     ) {
       const faceVerificationResponse =
-        payload.data as QoreIdFaceVerificationResponse;
-      const livenessStatus = this.resolveQoreIdFaceVerificationStatus(
+        payload.data as DikriptFaceVerificationResponse;
+      const livenessStatus = this.resolveDikriptFaceVerificationStatus(
         faceVerificationResponse,
       );
       const nextWorkflowStatus = this.deriveVerificationWorkflowStatus({
@@ -700,17 +969,76 @@ export class WalletService {
         verification.accountOwnershipType,
         livenessStatus,
       );
+      const existingTier = this.resolveKycTier(
+        verification,
+        verification.settlementProfile,
+      );
+      const shouldPreserveBasicTier =
+        existingTier === KycTierDto.BASIC &&
+        verification.status === KycVerificationStatus.VERIFIED &&
+        verification.settlementProfile?.status ===
+          CreatorSettlementProfileStatus.ACTIVE;
+      const fullUpgradePassed =
+        shouldPreserveBasicTier &&
+        this.canAutoApproveKycTier({
+          targetTier: KycTierDto.FULL,
+          accountOwnershipType: verification.accountOwnershipType,
+          businessStatus: verification.businessStatus,
+          identityStatus: verification.identityStatus,
+          livenessStatus,
+          nameMatchStatus: verification.nameMatchStatus,
+          dedupStatus: verification.dedupStatus,
+        });
+      const fullReviewRequired =
+        shouldPreserveBasicTier &&
+        livenessStatus === KycVerificationStatus.VERIFIED &&
+        !fullUpgradePassed;
+      const nextTier = fullUpgradePassed ? KycTierDto.FULL : existingTier;
+      const metadata = this.normalizeJsonObject(updateData.metadata);
 
       updateData.livenessStatus = livenessStatus;
-      updateData.status = nextWorkflowStatus;
+      updateData.status = fullUpgradePassed
+        ? KycVerificationStatus.VERIFIED
+        : fullReviewRequired
+          ? KycVerificationStatus.SUBMITTED
+          : shouldPreserveBasicTier
+            ? verification.status
+            : nextWorkflowStatus;
       updateData.rejectionReason =
         livenessStatus === KycVerificationStatus.REJECTED
-          ? 'QoreID webhook reported failed face verification'
-          : null;
+          ? 'Dikript webhook reported failed face verification'
+          : fullReviewRequired
+            ? 'Full KYC needs manual review before the tier can be upgraded.'
+            : null;
+      updateData.submittedAt = fullReviewRequired
+        ? new Date()
+        : verification.submittedAt;
+      updateData.reviewedAt = fullReviewRequired
+        ? null
+        : verification.reviewedAt;
+      updateData.metadata = {
+        ...metadata,
+        kycTier: nextTier,
+        approvedTier: nextTier,
+        targetTier: KycTierDto.FULL,
+      };
 
-      payoutUpdate.kycStatus = nextPayoutState.kycStatus;
-      payoutUpdate.status = nextPayoutState.profileStatus;
-      payoutUpdate.rejectionReason = nextPayoutState.rejectionReason;
+      payoutUpdate.kycStatus =
+        fullUpgradePassed || shouldPreserveBasicTier
+          ? KycVerificationStatus.VERIFIED
+          : nextPayoutState.kycStatus;
+      payoutUpdate.status =
+        fullUpgradePassed || shouldPreserveBasicTier
+          ? CreatorSettlementProfileStatus.ACTIVE
+          : nextPayoutState.profileStatus;
+      payoutUpdate.rejectionReason = shouldPreserveBasicTier
+        ? null
+        : nextPayoutState.rejectionReason;
+      payoutUpdate.metadata = {
+        ...this.normalizeJsonObject(verification.settlementProfile?.metadata),
+        kycTier: nextTier,
+        approvedTier: nextTier,
+      };
       resolvedNotificationTarget = KycResolutionNotificationTargetDto.LIVENESS;
       resolvedNotificationStatus = livenessStatus;
     }
@@ -775,56 +1103,96 @@ export class WalletService {
     const normalizedAccountNumber = this.normalizePayoutAccountNumber(
       dto.accountNumber,
     );
-    const [existingProfile, user] = await Promise.all([
-      this.prisma.creatorSettlementProfile.findUnique({
-        where: { userId },
-      }),
-      this.prisma.user.findUnique({
-        where: { id: userId },
-        select: {
-          fullName: true,
-          phoneNumber: true,
-        },
-      }),
-    ]);
-
-    if (!normalizedBankCode) {
-      throw new BadRequestException('Bank code is required');
-    }
-
-    if (!normalizedAccountNumber) {
-      throw new BadRequestException('Account number is required');
-    }
-
-    await this.assertNoDuplicatePayoutAccount(
-      userId,
+    const payoutAccount = this.resolveValidPayoutAccountDetails(
       normalizedBankCode,
       normalizedAccountNumber,
     );
+    const [existingProfile, existingVerification] = await Promise.all([
+      this.prisma.creatorSettlementProfile.findUnique({
+        where: { userId },
+      }),
+      this.prisma.creatorKycVerification.findUnique({
+        where: { userId },
+      }),
+    ]);
+
+    await this.assertNoDuplicatePayoutAccount(
+      userId,
+      payoutAccount.bankCode,
+      payoutAccount.accountNumber,
+    );
 
     const ownershipType = dto.accountOwnershipType as AccountOwnershipType;
-    const accountVerification = await this.verifyPayoutAccount(
+    const canReusePayoutVerification = this.canReusePayoutVerification(
+      existingProfile,
       ownershipType,
-      {
-        ...dto,
-        bankCode: normalizedBankCode,
-        accountNumber: normalizedAccountNumber,
-      },
-      user?.phoneNumber || null,
+      payoutAccount.bankCode,
+      payoutAccount.accountNumber,
     );
+    const accountResolution = canReusePayoutVerification
+      ? null
+      : await this.resolvePayoutAccountWithPaystack(
+          payoutAccount.bankCode,
+          payoutAccount.accountNumber,
+        );
     const resolvedAccountName =
-      accountVerification?.nuban?.accountName || dto.accountName || null;
-    const resolvedStatus = accountVerification
-      ? CreatorSettlementProfileStatus.ACCOUNT_VERIFIED
-      : CreatorSettlementProfileStatus.ACCOUNT_PROVIDED;
+      accountResolution?.accountName ||
+      (canReusePayoutVerification ? existingProfile?.accountName : null) ||
+      null;
+    const resolvedLegalName =
+      ownershipType === AccountOwnershipType.PERSONAL
+        ? resolvedAccountName
+        : null;
+    const resolvedBusinessName =
+      ownershipType === AccountOwnershipType.BUSINESS
+        ? resolvedAccountName
+        : null;
+    const resolvedStatus = CreatorSettlementProfileStatus.ACCOUNT_VERIFIED;
 
     const criticalFieldsChanged =
       !!existingProfile &&
-      (existingProfile.accountNumber !== normalizedAccountNumber ||
+      (existingProfile.accountNumber !== payoutAccount.accountNumber ||
         existingProfile.bankName !== dto.bankName ||
-        existingProfile.bankCode !== normalizedBankCode ||
+        existingProfile.bankCode !== payoutAccount.bankCode ||
         existingProfile.accountName !== resolvedAccountName ||
         existingProfile.accountOwnershipType !== ownershipType);
+    const ownershipTypeChanged =
+      !!existingProfile &&
+      existingProfile.accountOwnershipType !== ownershipType;
+    const existingProfileMetadata = this.normalizeJsonObject(
+      existingProfile?.metadata,
+    );
+    const nextProfileMetadata = {
+      ...existingProfileMetadata,
+      accountNameConfirmation: this.buildPayoutAccountConfirmation({
+        accountName: resolvedAccountName,
+        bankCode: payoutAccount.bankCode,
+        accountNumber: payoutAccount.accountNumber,
+      }),
+      paystack: accountResolution
+        ? this.summarizePaystackAccountResolution(accountResolution)
+        : existingProfileMetadata.paystack || null,
+      dikript: existingProfileMetadata.dikript || null,
+      verificationCost: {
+        ...this.normalizeJsonObject(existingProfileMetadata.verificationCost),
+        payoutAccount: {
+          provider: 'PAYSTACK',
+          reused: canReusePayoutVerification,
+          charged: false,
+          accountHash: this.hashKycSubject(payoutAccount.accountNumber),
+          checkedAt: new Date().toISOString(),
+        },
+      },
+    };
+    const recalculatedNameMatch =
+      existingVerification && !ownershipTypeChanged
+        ? this.evaluateSettlementNameMatch({
+            accountOwnershipType: ownershipType,
+            accountName: resolvedAccountName,
+            verifiedFullName: existingVerification.verifiedFullName,
+            verifiedBusinessName: existingVerification.verifiedBusinessName,
+          })
+        : null;
 
     const nextStatus =
       existingProfile?.status === CreatorSettlementProfileStatus.ACTIVE &&
@@ -833,43 +1201,39 @@ export class WalletService {
         : resolvedStatus;
 
     const nextKycStatus =
-      criticalFieldsChanged || !existingProfile?.kycStatus
+      ownershipTypeChanged || !existingProfile?.kycStatus
         ? KycVerificationStatus.NOT_STARTED
-        : existingProfile.kycStatus;
+        : criticalFieldsChanged && existingVerification
+          ? KycVerificationStatus.IN_PROGRESS
+          : existingProfile.kycStatus;
 
-    const nextNameMatchStatus = criticalFieldsChanged
+    const nextNameMatchStatus = ownershipTypeChanged
       ? NameMatchStatus.NOT_CHECKED
-      : existingProfile?.nameMatchStatus || NameMatchStatus.NOT_CHECKED;
+      : recalculatedNameMatch?.status ||
+        existingProfile?.nameMatchStatus ||
+        NameMatchStatus.NOT_CHECKED;
 
     const profile = await this.prisma.creatorSettlementProfile.upsert({
       where: { userId },
       update: {
-        businessName: dto.businessName,
-        legalName: dto.legalName,
+        businessName: resolvedBusinessName,
+        legalName: resolvedLegalName,
         accountOwnershipType: ownershipType,
         bankName: dto.bankName,
-        bankCode: normalizedBankCode,
+        bankCode: payoutAccount.bankCode,
         accountName: resolvedAccountName,
-        accountNumber: normalizedAccountNumber,
-        accountNumberMasked: this.maskAccountNumber(normalizedAccountNumber),
-        bvnLast4: dto.bvnLast4,
-        accountVerifiedAt: accountVerification ? new Date() : null,
+        accountNumber: payoutAccount.accountNumber,
+        accountNumberMasked: this.maskAccountNumber(
+          payoutAccount.accountNumber,
+        ),
+        bvnLast4: null,
+        accountVerifiedAt: canReusePayoutVerification
+          ? existingProfile?.accountVerifiedAt || new Date()
+          : new Date(),
         kycStatus: nextKycStatus,
         nameMatchStatus: nextNameMatchStatus,
         status: nextStatus,
-        metadata: {
-          ...(existingProfile?.metadata &&
-          typeof existingProfile.metadata === 'object' &&
-          !Array.isArray(existingProfile.metadata)
-            ? (existingProfile.metadata as Record<string, any>)
-            : {}),
-          qoreId: accountVerification
-            ? this.summarizeQoreNubanResponse(
-                accountVerification,
-                ownershipType,
-              )
-            : null,
-        },
+        metadata: nextProfileMetadata,
         submittedAt: new Date(),
         approvedAt:
           nextStatus === CreatorSettlementProfileStatus.ACTIVE
@@ -880,96 +1244,124 @@ export class WalletService {
       },
       create: {
         userId,
-        businessName: dto.businessName,
-        legalName: dto.legalName,
+        businessName: resolvedBusinessName,
+        legalName: resolvedLegalName,
         accountOwnershipType: ownershipType,
         bankName: dto.bankName,
-        bankCode: normalizedBankCode,
+        bankCode: payoutAccount.bankCode,
         accountName: resolvedAccountName,
-        accountNumber: normalizedAccountNumber,
-        accountNumberMasked: this.maskAccountNumber(normalizedAccountNumber),
-        bvnLast4: dto.bvnLast4,
-        accountVerifiedAt: accountVerification ? new Date() : null,
+        accountNumber: payoutAccount.accountNumber,
+        accountNumberMasked: this.maskAccountNumber(
+          payoutAccount.accountNumber,
+        ),
+        bvnLast4: null,
+        accountVerifiedAt: new Date(),
         kycStatus: KycVerificationStatus.NOT_STARTED,
         nameMatchStatus: NameMatchStatus.NOT_CHECKED,
         status: resolvedStatus,
         submittedAt: new Date(),
-        metadata: {
-          qoreId: accountVerification
-            ? this.summarizeQoreNubanResponse(
-                accountVerification,
-                ownershipType,
-              )
-            : null,
-        },
+        metadata: nextProfileMetadata,
       },
     });
 
     await this.prisma.creatorKycVerification.upsert({
       where: { userId },
       update: {
+        provider: KYC_PROVIDER_DIKRIPT,
         accountOwnershipType: ownershipType,
         verificationMode:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
         businessStatus:
-          criticalFieldsChanged && existingProfile
+          ownershipTypeChanged && existingProfile
             ? KycVerificationStatus.NOT_STARTED
             : undefined,
         identityStatus:
-          criticalFieldsChanged && existingProfile
+          ownershipTypeChanged && existingProfile
             ? KycVerificationStatus.NOT_STARTED
             : undefined,
         livenessStatus:
-          criticalFieldsChanged && existingProfile
+          ownershipTypeChanged && existingProfile
             ? KycVerificationStatus.NOT_STARTED
             : undefined,
         amlStatus:
-          criticalFieldsChanged && existingProfile
+          ownershipTypeChanged && existingProfile
             ? KycVerificationStatus.NOT_STARTED
             : undefined,
         dedupStatus:
-          criticalFieldsChanged && existingProfile
+          ownershipTypeChanged && existingProfile
             ? KycVerificationStatus.NOT_STARTED
             : undefined,
         status:
-          criticalFieldsChanged && existingProfile
+          ownershipTypeChanged && existingProfile
             ? KycVerificationStatus.NOT_STARTED
-            : undefined,
+            : criticalFieldsChanged && existingVerification
+              ? KycVerificationStatus.IN_PROGRESS
+              : undefined,
         nameMatchStatus:
-          criticalFieldsChanged && existingProfile
+          ownershipTypeChanged && existingProfile
             ? NameMatchStatus.NOT_CHECKED
-            : undefined,
+            : recalculatedNameMatch
+              ? recalculatedNameMatch.status
+              : undefined,
+        nameMatchScore:
+          ownershipTypeChanged && existingProfile
+            ? null
+            : recalculatedNameMatch
+              ? recalculatedNameMatch.score
+              : undefined,
+        nameMatchReason:
+          ownershipTypeChanged && existingProfile
+            ? null
+            : recalculatedNameMatch
+              ? recalculatedNameMatch.reason
+              : undefined,
         identityType:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
         identityReferenceMasked:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
         identityReferenceLast4:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
         providerSubjectHash:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
         providerSubjectLast4:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
         businessReferenceHash:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
         businessReferenceLast4:
-          criticalFieldsChanged && existingProfile ? null : undefined,
-        nameDobHash: criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
+        nameDobHash: ownershipTypeChanged && existingProfile ? null : undefined,
         verifiedFullName:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
         verifiedBusinessName:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
         verifiedDateOfBirth:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
         qoreBusinessCheckId:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
         qoreIdentityCheckId:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
         qoreLivenessCheckId:
-          criticalFieldsChanged && existingProfile ? null : undefined,
+          ownershipTypeChanged && existingProfile ? null : undefined,
+        metadata: existingVerification
+          ? {
+              ...this.normalizeJsonObject(existingVerification.metadata),
+              flow: {
+                ...this.normalizeJsonObject(
+                  this.normalizeJsonObject(existingVerification.metadata).flow,
+                ),
+                ownershipTypeChanged,
+                payoutAccountChanged: criticalFieldsChanged,
+                accountNameMatchRecheckedAt: recalculatedNameMatch
+                  ? new Date().toISOString()
+                  : null,
+              },
+            }
+          : undefined,
       },
       create: {
         userId,
         settlementProfileId: profile.id,
+        provider: KYC_PROVIDER_DIKRIPT,
         accountOwnershipType: ownershipType,
       },
     });
@@ -987,8 +1379,10 @@ export class WalletService {
           previousAccountName: existingProfile.accountName,
           previousOwnershipType: existingProfile.accountOwnershipType,
           newBankName: dto.bankName,
-          newBankCode: normalizedBankCode,
-          newAccountNumberMasked: this.maskAccountNumber(normalizedAccountNumber),
+          newBankCode: payoutAccount.bankCode,
+          newAccountNumberMasked: this.maskAccountNumber(
+            payoutAccount.accountNumber,
+          ),
           newAccountName: resolvedAccountName,
           newOwnershipType: ownershipType,
           nameChanged: existingProfile.accountName !== resolvedAccountName,
@@ -1005,7 +1399,7 @@ export class WalletService {
         where: { userId },
         update: {
           status: CreatorAlatProfileStatus.PENDING_REVIEW,
-          accountNumber: normalizedAccountNumber,
+          accountNumber: payoutAccount.accountNumber,
           accountName: resolvedAccountName,
           displayName: this.buildAlatDisplayName(resolvedAccountName),
           activatedAt: null,
@@ -1017,7 +1411,7 @@ export class WalletService {
         create: {
           userId,
           status: CreatorAlatProfileStatus.PENDING_REVIEW,
-          accountNumber: normalizedAccountNumber,
+          accountNumber: payoutAccount.accountNumber,
           accountName: resolvedAccountName,
           displayName: this.buildAlatDisplayName(resolvedAccountName),
           deactivatedAt: new Date(),
@@ -1031,6 +1425,44 @@ export class WalletService {
     await this.syncCreatorSettlementStatus(userId, profile.status);
 
     return this.formatPayoutProfile(profile);
+  }
+
+  async confirmPayoutProfile(userId: string) {
+    const profile = await this.prisma.creatorSettlementProfile.findUnique({
+      where: { userId },
+    });
+
+    if (!profile) {
+      throw new NotFoundException('Payout profile not found');
+    }
+
+    if (
+      profile.status === CreatorSettlementProfileStatus.NOT_STARTED ||
+      !profile.accountVerifiedAt ||
+      !profile.accountName
+    ) {
+      throw new BadRequestException(
+        'A verified payout account is required before account name confirmation',
+      );
+    }
+
+    const metadata = this.normalizeJsonObject(profile.metadata);
+    const updatedProfile = await this.prisma.creatorSettlementProfile.update({
+      where: { userId },
+      data: {
+        metadata: {
+          ...metadata,
+          accountNameConfirmation: {
+            confirmedAt: new Date().toISOString(),
+            accountName: profile.accountName,
+            bankCode: profile.bankCode,
+            accountNumberHash: this.hashKycSubject(profile.accountNumber),
+          },
+        },
+      },
+    });
+
+    return this.formatPayoutProfile(updatedProfile);
   }
 
   async reviewPayoutProfile(
@@ -1073,8 +1505,11 @@ export class WalletService {
   }
 
   async startPersonalKyc(userId: string, dto: StartPersonalKycDto) {
-    const [payoutProfile, user] = await Promise.all([
+    const [payoutProfile, existingVerification, user] = await Promise.all([
       this.prisma.creatorSettlementProfile.findUnique({
+        where: { userId },
+      }),
+      this.prisma.creatorKycVerification.findUnique({
         where: { userId },
       }),
       this.prisma.user.findUnique({
@@ -1098,6 +1533,12 @@ export class WalletService {
       payoutProfile.accountNumber,
     );
 
+    if (!this.hasVerifiedPayoutAccount(payoutProfile)) {
+      throw new BadRequestException(
+        'Add a verified payout account before starting identity verification',
+      );
+    }
+
     const resolvedNames = this.resolveIdentityNames(
       dto.firstName,
       dto.lastName,
@@ -1114,162 +1555,372 @@ export class WalletService {
     }
 
     const verificationMode = this.resolvePersonalVerificationMode(dto);
-    const identityResponse = await this.verifyPersonalIdentityWithQoreId({
-      verificationMode,
-      dto,
-      resolvedNames,
-      user,
-    });
-
-    if (!identityResponse) {
-      throw new BadRequestException(
-        'Phone number, NIN, vNIN, or passport number is required for personal KYC',
-      );
-    }
-
-    const identityStatus = this.resolveQoreIdIdentityStatus(identityResponse);
-    const payoutState = this.derivePayoutStateFromVerificationStatus(
-      identityStatus === KycVerificationStatus.VERIFIED
-        ? KycVerificationStatus.IN_PROGRESS
-        : identityStatus,
-      AccountOwnershipType.PERSONAL,
-    );
-    const identityRecord = this.extractIdentityRecord(identityResponse);
-    const identityType = this.resolveIdentityTypeFromMode(verificationMode);
-    const verifiedFullName = this.combineNameParts(
-      identityRecord?.firstname,
-      identityRecord?.middlename,
-      identityRecord?.lastname,
-    );
-    const verifiedDateOfBirth = this.parseDate(
-      identityRecord?.birthdate || dto.dateOfBirth || null,
-    );
     const identityReference = this.resolveIdentityReferenceFromMode(
       verificationMode,
       dto,
     );
-    const providerSubject = this.extractProviderSubject(identityResponse);
-    const duplicateReview = await this.detectDuplicateKycSignals({
-      userId,
-      providerSubjectHash: this.hashKycSubject(providerSubject),
-      nameDobHash: this.hashNameDob(verifiedFullName, verifiedDateOfBirth),
+    this.assertIdentityReferenceIsLocallyValid(
+      verificationMode,
+      identityReference,
+    );
+    const identityInputHash = this.hashVerificationInput(
+      'personalIdentity',
+      verificationMode,
+      identityReference,
+    );
+    const cachedIdentity = this.getCachedVerificationAttempt(
+      existingVerification?.metadata,
+      'personalIdentity',
+      identityInputHash,
+    );
+    let identityStatus =
+      cachedIdentity && existingVerification
+        ? existingVerification.identityStatus
+        : KycVerificationStatus.NOT_STARTED;
+    let identityRecord: any = null;
+    let verifiedFullName =
+      cachedIdentity && existingVerification
+        ? existingVerification.verifiedFullName
+        : null;
+    let verifiedDateOfBirth =
+      cachedIdentity && existingVerification
+        ? existingVerification.verifiedDateOfBirth
+        : null;
+    let providerSubject: string | null = null;
+    let identityResponse: DikriptNinResponse | null = null;
+
+    if (!cachedIdentity) {
+      identityResponse = await this.verifyPersonalIdentityWithDikript({
+        verificationMode,
+        dto,
+        resolvedNames,
+        user,
+      });
+
+      if (!identityResponse) {
+        throw new BadRequestException(
+          'NIN, BVN, or phone number is required for personal KYC',
+        );
+      }
+
+      identityStatus = this.resolveDikriptIdentityStatus(identityResponse);
+      identityRecord = this.extractIdentityRecord(identityResponse);
+      verifiedFullName = this.combineNameParts(
+        identityRecord?.firstname,
+        identityRecord?.middlename,
+        identityRecord?.lastname,
+      );
+      verifiedDateOfBirth = this.parseDate(
+        identityRecord?.birthdate || dto.dateOfBirth || null,
+      );
+      providerSubject = this.extractProviderSubject(identityResponse);
+    }
+
+    const identityType = this.resolveIdentityTypeFromMode(verificationMode);
+    const providerSubjectHash = cachedIdentity
+      ? existingVerification?.providerSubjectHash || null
+      : this.hashKycSubject(providerSubject);
+    const providerSubjectLast4 = cachedIdentity
+      ? existingVerification?.providerSubjectLast4 || null
+      : this.getLast4(providerSubject);
+    const nameDobHash = this.hashNameDob(verifiedFullName, verifiedDateOfBirth);
+    const duplicateReview = cachedIdentity
+      ? {
+          status:
+            existingVerification?.dedupStatus ||
+            KycVerificationStatus.NOT_STARTED,
+          reason: null,
+          metadata: this.normalizeJsonObject(
+            this.normalizeJsonObject(existingVerification?.metadata)
+              .dedupReview,
+          ),
+        }
+      : await this.detectDuplicateKycSignals({
+          userId,
+          providerSubjectHash,
+          nameDobHash,
+        });
+    const nameMatch =
+      identityStatus === KycVerificationStatus.VERIFIED
+        ? this.evaluateSettlementNameMatch({
+            accountOwnershipType: AccountOwnershipType.PERSONAL,
+            accountName: payoutProfile.accountName,
+            verifiedFullName,
+            verifiedBusinessName: null,
+          })
+        : {
+            status: NameMatchStatus.NOT_CHECKED,
+            score: 0,
+            reason: 'Identity verification has not passed yet',
+          };
+    const basicAutoApproved = this.canAutoApproveKycTier({
+      targetTier: KycTierDto.BASIC,
+      accountOwnershipType: AccountOwnershipType.PERSONAL,
+      identityStatus,
+      nameMatchStatus: nameMatch.status,
+      dedupStatus: duplicateReview.status,
     });
+    const manualReviewReason =
+      identityStatus === KycVerificationStatus.VERIFIED && !basicAutoApproved
+        ? this.getKycManualReviewReason({
+            nameMatchStatus: nameMatch.status,
+            nameMatchReason: nameMatch.reason,
+            duplicateReason: duplicateReview.reason,
+            mismatchReason:
+              'Payout account name does not match verified identity',
+            reviewReason:
+              'Payout account name needs manual review before Basic KYC can be approved.',
+          })
+        : null;
+    const nextVerificationStatus =
+      identityStatus === KycVerificationStatus.REJECTED
+        ? KycVerificationStatus.REJECTED
+        : identityStatus === KycVerificationStatus.PENDING_PROVIDER
+          ? KycVerificationStatus.PENDING_PROVIDER
+          : basicAutoApproved
+            ? KycVerificationStatus.VERIFIED
+            : manualReviewReason
+              ? KycVerificationStatus.SUBMITTED
+              : KycVerificationStatus.IN_PROGRESS;
+    const payoutState = basicAutoApproved
+      ? {
+          kycStatus: KycVerificationStatus.VERIFIED,
+          profileStatus: CreatorSettlementProfileStatus.ACTIVE,
+          rejectionReason: null,
+        }
+      : manualReviewReason
+        ? {
+            kycStatus: KycVerificationStatus.SUBMITTED,
+            profileStatus: CreatorSettlementProfileStatus.REVIEW_REQUIRED,
+            rejectionReason: manualReviewReason,
+          }
+        : this.derivePayoutStateFromVerificationStatus(
+            identityStatus === KycVerificationStatus.VERIFIED
+              ? KycVerificationStatus.IN_PROGRESS
+              : identityStatus,
+            AccountOwnershipType.PERSONAL,
+          );
+    const approvedTier = basicAutoApproved ? KycTierDto.BASIC : KycTierDto.NONE;
+    const kycSubmittedAt = manualReviewReason ? new Date() : null;
 
     const verification = await this.prisma.creatorKycVerification.upsert({
       where: { userId },
       update: {
+        provider: KYC_PROVIDER_DIKRIPT,
         accountOwnershipType: AccountOwnershipType.PERSONAL,
         verificationMode,
         phoneNumber: dto.phoneNumber || user?.phoneNumber || undefined,
         identityType,
         identityReferenceMasked: this.maskIdentityReference(identityReference),
         identityReferenceLast4: this.getLast4(identityReference),
-        providerSubjectHash: this.hashKycSubject(providerSubject),
-        providerSubjectLast4: this.getLast4(providerSubject),
+        providerSubjectHash,
+        providerSubjectLast4,
         businessReferenceHash: null,
         businessReferenceLast4: null,
         businessStatus: KycVerificationStatus.NOT_STARTED,
         livenessStatus: KycVerificationStatus.NOT_STARTED,
         qoreLivenessCheckId: null,
         dedupStatus: duplicateReview.status,
-        nameMatchStatus: NameMatchStatus.NOT_CHECKED,
-        status:
-          identityStatus === KycVerificationStatus.PENDING_PROVIDER
-            ? KycVerificationStatus.PENDING_PROVIDER
-            : KycVerificationStatus.IN_PROGRESS,
+        nameMatchStatus: nameMatch.status,
+        nameMatchScore: nameMatch.score,
+        nameMatchReason: nameMatch.reason,
+        status: nextVerificationStatus,
         identityStatus,
         verifiedFullName,
         verifiedDateOfBirth,
-        nameDobHash: this.hashNameDob(verifiedFullName, verifiedDateOfBirth),
-        qoreIdentityCheckId: String(identityResponse.id),
+        nameDobHash,
+        submittedAt: kycSubmittedAt,
+        reviewedAt: null,
+        qoreIdentityCheckId: identityResponse
+          ? String(identityResponse.id)
+          : existingVerification?.qoreIdentityCheckId || null,
         rejectionReason:
           identityStatus === KycVerificationStatus.REJECTED
-            ? 'QoreID could not verify the submitted personal identity details'
-            : null,
+            ? 'Dikript could not verify the submitted personal identity details'
+            : manualReviewReason,
         metadata: {
           ...(await this.getKycMetadata(userId)),
+          kycTier: approvedTier,
+          approvedTier,
+          targetTier: KycTierDto.BASIC,
           personalDraft: {
             firstName: resolvedNames.firstName,
             lastName: resolvedNames.lastName,
             dateOfBirth: dto.dateOfBirth || null,
           },
           dedupReview: duplicateReview.metadata,
-          qoreIdIdentity: this.summarizeQoreNinResponse(identityResponse, {
-            verificationMode,
-            identityType,
-          }),
+          dikriptIdentity: identityResponse
+            ? this.summarizeDikriptIdentityResponse(identityResponse, {
+                verificationMode,
+                identityType,
+              })
+            : this.normalizeJsonObject(existingVerification?.metadata)
+                .dikriptIdentity || null,
+          verificationCache: this.mergeVerificationCache(
+            existingVerification?.metadata,
+            'personalIdentity',
+            {
+              inputHash: identityInputHash,
+              provider: 'DIKRIPT',
+              requestId: identityResponse
+                ? String(identityResponse.id)
+                : existingVerification?.qoreIdentityCheckId || null,
+              status: identityStatus,
+              reused: Boolean(cachedIdentity),
+              charged: !cachedIdentity,
+              checkedAt: new Date().toISOString(),
+            },
+          ),
         },
       },
       create: {
         userId,
         settlementProfileId: payoutProfile.id,
+        provider: KYC_PROVIDER_DIKRIPT,
         accountOwnershipType: AccountOwnershipType.PERSONAL,
         verificationMode,
         phoneNumber: dto.phoneNumber || user?.phoneNumber || null,
         identityType,
         identityReferenceMasked: this.maskIdentityReference(identityReference),
         identityReferenceLast4: this.getLast4(identityReference),
-        providerSubjectHash: this.hashKycSubject(providerSubject),
-        providerSubjectLast4: this.getLast4(providerSubject),
+        providerSubjectHash,
+        providerSubjectLast4,
         businessReferenceHash: null,
         businessReferenceLast4: null,
         businessStatus: KycVerificationStatus.NOT_STARTED,
         livenessStatus: KycVerificationStatus.NOT_STARTED,
         dedupStatus: duplicateReview.status,
-        nameMatchStatus: NameMatchStatus.NOT_CHECKED,
-        status:
-          identityStatus === KycVerificationStatus.PENDING_PROVIDER
-            ? KycVerificationStatus.PENDING_PROVIDER
-            : KycVerificationStatus.IN_PROGRESS,
+        nameMatchStatus: nameMatch.status,
+        nameMatchScore: nameMatch.score,
+        nameMatchReason: nameMatch.reason,
+        status: nextVerificationStatus,
         identityStatus,
         verifiedFullName,
         verifiedDateOfBirth,
-        nameDobHash: this.hashNameDob(verifiedFullName, verifiedDateOfBirth),
-        qoreIdentityCheckId: String(identityResponse.id),
+        nameDobHash,
+        submittedAt: kycSubmittedAt,
+        reviewedAt: null,
+        qoreIdentityCheckId: identityResponse
+          ? String(identityResponse.id)
+          : null,
         rejectionReason:
           identityStatus === KycVerificationStatus.REJECTED
-            ? 'QoreID could not verify the submitted personal identity details'
-            : null,
+            ? 'Dikript could not verify the submitted personal identity details'
+            : manualReviewReason,
         metadata: {
+          kycTier: approvedTier,
+          approvedTier,
+          targetTier: KycTierDto.BASIC,
           personalDraft: {
             firstName: resolvedNames.firstName,
             lastName: resolvedNames.lastName,
             dateOfBirth: dto.dateOfBirth || null,
           },
           dedupReview: duplicateReview.metadata,
-          qoreIdIdentity: this.summarizeQoreNinResponse(identityResponse, {
-            verificationMode,
-            identityType,
-          }),
+          dikriptIdentity: identityResponse
+            ? this.summarizeDikriptIdentityResponse(identityResponse, {
+                verificationMode,
+                identityType,
+              })
+            : null,
+          verificationCache: this.mergeVerificationCache(
+            null,
+            'personalIdentity',
+            {
+              inputHash: identityInputHash,
+              provider: 'DIKRIPT',
+              requestId: identityResponse ? String(identityResponse.id) : null,
+              status: identityStatus,
+              reused: Boolean(cachedIdentity),
+              charged: !cachedIdentity,
+              checkedAt: new Date().toISOString(),
+            },
+          ),
         },
       },
     });
 
-    await this.prisma.creatorSettlementProfile.update({
-      where: { userId },
-      data: {
-        accountOwnershipType: AccountOwnershipType.PERSONAL,
-        kycStatus: payoutState.kycStatus,
-        status: payoutState.profileStatus,
-        approvedAt: null,
-        rejectedAt: null,
-        rejectionReason: payoutState.rejectionReason,
-      },
-    });
+    const updatedPayoutProfile =
+      await this.prisma.creatorSettlementProfile.update({
+        where: { userId },
+        data: {
+          accountOwnershipType: AccountOwnershipType.PERSONAL,
+          kycStatus: payoutState.kycStatus,
+          status: payoutState.profileStatus,
+          nameMatchStatus: nameMatch.status,
+          approvedAt: basicAutoApproved
+            ? payoutProfile.approvedAt || new Date()
+            : null,
+          rejectedAt: null,
+          rejectionReason: payoutState.rejectionReason,
+          metadata: {
+            ...this.normalizeJsonObject(payoutProfile.metadata),
+            kycTier: approvedTier,
+            approvedTier,
+          },
+        },
+      });
 
     await this.syncCreatorSettlementStatus(userId, payoutState.profileStatus);
 
-    return this.formatKyc(verification);
+    return this.formatKyc(
+      verification,
+      updatedPayoutProfile,
+      await this.getKycTierSummary(userId, verification, updatedPayoutProfile),
+    );
   }
 
   async submitPersonalLiveness(userId: string, dto: PersonalLivenessDto) {
-    const existingVerification =
-      await this.prisma.creatorKycVerification.findUnique({
+    const [existingVerification, payoutProfile] = await Promise.all([
+      this.prisma.creatorKycVerification.findUnique({
         where: { userId },
-      });
+      }),
+      this.prisma.creatorSettlementProfile.findUnique({
+        where: { userId },
+      }),
+    ]);
 
-    if (!existingVerification) {
+    if (!existingVerification || !payoutProfile) {
       throw new NotFoundException('KYC profile not found');
+    }
+
+    if (
+      existingVerification.livenessStatus === KycVerificationStatus.VERIFIED
+    ) {
+      return this.formatKyc(
+        existingVerification,
+        payoutProfile,
+        await this.getKycTierSummary(
+          userId,
+          existingVerification,
+          payoutProfile,
+        ),
+      );
+    }
+
+    if (
+      existingVerification.livenessStatus ===
+      KycVerificationStatus.PENDING_PROVIDER
+    ) {
+      throw new BadRequestException(
+        'Face verification is already pending provider response',
+      );
+    }
+
+    const tierSummary = await this.getKycTierSummary(
+      userId,
+      existingVerification,
+      payoutProfile,
+    );
+
+    if (
+      payoutProfile.status !== CreatorSettlementProfileStatus.ACTIVE ||
+      this.resolveKycTier(existingVerification, payoutProfile) !==
+        KycTierDto.BASIC
+    ) {
+      throw new BadRequestException(
+        'Basic KYC must be approved before face verification can be submitted',
+      );
     }
 
     if (!existingVerification.verificationMode) {
@@ -1298,7 +1949,12 @@ export class WalletService {
     }
 
     if (
-      existingVerification.identityStatus !== KycVerificationStatus.VERIFIED
+      existingVerification.identityStatus !== KycVerificationStatus.VERIFIED &&
+      !(
+        existingVerification.accountOwnershipType ===
+          AccountOwnershipType.BUSINESS &&
+        existingVerification.identityStatus === KycVerificationStatus.SUBMITTED
+      )
     ) {
       if (
         existingVerification.identityStatus ===
@@ -1314,53 +1970,67 @@ export class WalletService {
       );
     }
 
-    if (!dto.identityNumber) {
-      throw new BadRequestException(
-        'Identity number is required for face verification',
-      );
-    }
-
     if (!dto.imageUrl && !dto.photoBase64) {
       throw new BadRequestException(
         'A selfie photo URL or base64 image is required for face verification',
       );
     }
 
-    const faceVerificationResponse = await this.qoreIdService.verifyFaceMatch({
-      idType: this.resolveFaceVerificationIdType(
-        existingVerification.verificationMode,
-      ),
-      idNumber: dto.identityNumber,
+    const faceVerificationResponse = await this.dikriptService.verifyLiveness({
       photoUrl: dto.imageUrl || null,
       photoBase64: dto.photoBase64 || null,
     });
-    const livenessStatus = this.resolveQoreIdFaceVerificationStatus(
+    const livenessStatus = this.resolveDikriptFaceVerificationStatus(
       faceVerificationResponse,
     );
-    const workflowStatus = this.deriveVerificationWorkflowStatus({
-      accountOwnershipType: existingVerification.accountOwnershipType,
-      businessStatus: existingVerification.businessStatus,
-      identityStatus: existingVerification.identityStatus,
-      livenessStatus,
-    });
-    const payoutState = this.derivePayoutStateFromVerificationStatus(
-      workflowStatus,
-      existingVerification.accountOwnershipType,
-      livenessStatus,
-    );
+    const fullUpgradePassed =
+      existingVerification.status === KycVerificationStatus.VERIFIED &&
+      this.canAutoApproveKycTier({
+        targetTier: KycTierDto.FULL,
+        accountOwnershipType: existingVerification.accountOwnershipType,
+        businessStatus: existingVerification.businessStatus,
+        identityStatus: existingVerification.identityStatus,
+        livenessStatus,
+        nameMatchStatus: existingVerification.nameMatchStatus,
+        dedupStatus: existingVerification.dedupStatus,
+      });
+    const fullReviewRequired =
+      livenessStatus === KycVerificationStatus.VERIFIED && !fullUpgradePassed;
+    const existingMetadata = await this.getKycMetadata(userId);
+    const nextTier = fullUpgradePassed ? KycTierDto.FULL : KycTierDto.BASIC;
+    const kycSubmittedAt = fullReviewRequired ? new Date() : null;
 
     const verification = await this.prisma.creatorKycVerification.update({
       where: { userId },
       data: {
-        status: workflowStatus,
+        provider: KYC_PROVIDER_DIKRIPT,
+        status: fullUpgradePassed
+          ? KycVerificationStatus.VERIFIED
+          : fullReviewRequired
+            ? KycVerificationStatus.SUBMITTED
+            : existingVerification.status,
         livenessStatus,
         qoreLivenessCheckId: String(faceVerificationResponse.id),
+        submittedAt: fullReviewRequired
+          ? kycSubmittedAt
+          : existingVerification.submittedAt,
+        reviewedAt: fullReviewRequired ? null : existingVerification.reviewedAt,
+        rejectionReason:
+          livenessStatus === KycVerificationStatus.REJECTED
+            ? 'Dikript could not verify the submitted face details'
+            : fullReviewRequired
+              ? 'Full KYC needs manual review before the tier can be upgraded.'
+              : existingVerification.rejectionReason,
         metadata: {
-          ...(await this.getKycMetadata(userId)),
+          ...existingMetadata,
+          kycTier: nextTier,
+          approvedTier: nextTier,
+          targetTier: KycTierDto.FULL,
           liveness: {
             imageUrl: dto.imageUrl || null,
             submittedAt: new Date().toISOString(),
-            faceVerification: this.summarizeQoreFaceVerificationResponse(
+            requiredAtSubmit: tierSummary.livenessRequired,
+            faceVerification: this.summarizeDikriptFaceVerificationResponse(
               faceVerificationResponse,
             ),
           },
@@ -1368,25 +2038,35 @@ export class WalletService {
       },
     });
 
-    await this.prisma.creatorSettlementProfile.update({
-      where: { userId },
-      data: {
-        kycStatus: payoutState.kycStatus,
-        status: payoutState.profileStatus,
-        rejectionReason: payoutState.rejectionReason,
-        approvedAt: null,
-        rejectedAt:
-          payoutState.profileStatus ===
-            CreatorSettlementProfileStatus.REVIEW_REQUIRED &&
-          payoutState.kycStatus === KycVerificationStatus.REJECTED
-            ? new Date()
-            : null,
-      },
-    });
+    const updatedPayoutProfile =
+      await this.prisma.creatorSettlementProfile.update({
+        where: { userId },
+        data: {
+          kycStatus: KycVerificationStatus.VERIFIED,
+          status: CreatorSettlementProfileStatus.ACTIVE,
+          rejectionReason: null,
+          approvedAt: fullUpgradePassed
+            ? payoutProfile.approvedAt || new Date()
+            : payoutProfile.approvedAt,
+          rejectedAt: null,
+          metadata: {
+            ...this.normalizeJsonObject(payoutProfile.metadata),
+            kycTier: nextTier,
+            approvedTier: nextTier,
+          },
+        },
+      });
 
-    await this.syncCreatorSettlementStatus(userId, payoutState.profileStatus);
+    await this.syncCreatorSettlementStatus(
+      userId,
+      CreatorSettlementProfileStatus.ACTIVE,
+    );
 
-    return this.formatKyc(verification);
+    return this.formatKyc(
+      verification,
+      updatedPayoutProfile,
+      await this.getKycTierSummary(userId, verification, updatedPayoutProfile),
+    );
   }
 
   async startBusinessKyc(userId: string, dto: StartBusinessKycDto) {
@@ -1409,10 +2089,82 @@ export class WalletService {
       payoutProfile.accountNumber,
     );
 
-    const businessResponse = await this.qoreIdService.verifyCacBasic({
-      regNumber: dto.regNumber,
-    });
-    const businessStatus = this.resolveQoreIdBusinessStatus(businessResponse);
+    if (!this.hasVerifiedPayoutAccount(payoutProfile)) {
+      throw new BadRequestException(
+        'Add a verified payout account before starting business verification',
+      );
+    }
+
+    this.assertBusinessReferenceIsLocallyValid(dto.regNumber);
+    const businessInputHash = this.hashVerificationInput(
+      'businessIdentity',
+      'CAC',
+      dto.regNumber,
+    );
+    const cachedBusiness = this.getCachedVerificationAttempt(
+      existingVerification?.metadata,
+      'businessIdentity',
+      businessInputHash,
+    );
+    let businessResponse: DikriptCacResponse | null = null;
+    let businessStatus =
+      cachedBusiness && existingVerification
+        ? existingVerification.businessStatus
+        : KycVerificationStatus.NOT_STARTED;
+    let verifiedBusinessName =
+      cachedBusiness && existingVerification
+        ? existingVerification.verifiedBusinessName
+        : null;
+    let businessReference =
+      cachedBusiness && existingVerification ? null : dto.regNumber || null;
+
+    if (!cachedBusiness) {
+      businessResponse = await this.dikriptService.verifyCacBasic({
+        regNumber: dto.regNumber,
+      });
+      businessStatus = this.resolveDikriptBusinessStatus(businessResponse);
+      verifiedBusinessName =
+        businessResponse.cac?.companyName || dto.businessName || null;
+      businessReference =
+        businessResponse.cac?.rcNumber || dto.regNumber || null;
+    }
+
+    const businessReferenceHash = cachedBusiness
+      ? existingVerification?.businessReferenceHash || null
+      : this.hashKycSubject(businessReference);
+    const businessReferenceLast4 = cachedBusiness
+      ? existingVerification?.businessReferenceLast4 || null
+      : this.getLast4(businessReference);
+    const duplicateReview = cachedBusiness
+      ? {
+          status:
+            existingVerification?.dedupStatus ||
+            KycVerificationStatus.NOT_STARTED,
+          reason: null,
+          metadata: this.normalizeJsonObject(
+            this.normalizeJsonObject(existingVerification?.metadata)
+              .dedupReview,
+          ),
+        }
+      : await this.detectDuplicateKycSignals({
+          userId,
+          businessReferenceHash,
+          providerSubjectHash:
+            existingVerification?.providerSubjectHash || null,
+        });
+    const nameMatch =
+      businessStatus === KycVerificationStatus.VERIFIED
+        ? this.evaluateSettlementNameMatch({
+            accountOwnershipType: AccountOwnershipType.BUSINESS,
+            accountName: payoutProfile.accountName,
+            verifiedFullName: null,
+            verifiedBusinessName,
+          })
+        : {
+            status: NameMatchStatus.NOT_CHECKED,
+            score: 0,
+            reason: 'Business verification has not passed yet',
+          };
     const workflowStatus = this.deriveVerificationWorkflowStatus({
       accountOwnershipType: AccountOwnershipType.BUSINESS,
       businessStatus,
@@ -1423,89 +2175,194 @@ export class WalletService {
         existingVerification?.livenessStatus ||
         KycVerificationStatus.NOT_STARTED,
     });
-    const payoutState = this.derivePayoutStateFromVerificationStatus(
-      workflowStatus,
-      AccountOwnershipType.BUSINESS,
-      existingVerification?.livenessStatus || KycVerificationStatus.NOT_STARTED,
-    );
-    const businessReference =
-      businessResponse.cac?.rcNumber || dto.regNumber || null;
-    const duplicateReview = await this.detectDuplicateKycSignals({
-      userId,
-      businessReferenceHash: this.hashKycSubject(businessReference),
-      providerSubjectHash: existingVerification?.providerSubjectHash || null,
+    const basicAutoApproved = this.canAutoApproveKycTier({
+      targetTier: KycTierDto.BASIC,
+      accountOwnershipType: AccountOwnershipType.BUSINESS,
+      businessStatus,
+      nameMatchStatus: nameMatch.status,
+      dedupStatus: duplicateReview.status,
     });
+    const manualReviewReason =
+      businessStatus === KycVerificationStatus.VERIFIED && !basicAutoApproved
+        ? this.getKycManualReviewReason({
+            nameMatchStatus: nameMatch.status,
+            nameMatchReason: nameMatch.reason,
+            duplicateReason: duplicateReview.reason,
+            mismatchReason:
+              'Payout account name does not match verified business',
+            reviewReason:
+              'Payout account name needs manual review before Basic KYC can be approved.',
+          })
+        : null;
+    const nextVerificationStatus =
+      businessStatus === KycVerificationStatus.REJECTED
+        ? KycVerificationStatus.REJECTED
+        : businessStatus === KycVerificationStatus.PENDING_PROVIDER
+          ? KycVerificationStatus.PENDING_PROVIDER
+          : basicAutoApproved
+            ? KycVerificationStatus.VERIFIED
+            : manualReviewReason
+              ? KycVerificationStatus.SUBMITTED
+              : workflowStatus;
+    const payoutState = basicAutoApproved
+      ? {
+          kycStatus: KycVerificationStatus.VERIFIED,
+          profileStatus: CreatorSettlementProfileStatus.ACTIVE,
+          rejectionReason: null,
+        }
+      : manualReviewReason
+        ? {
+            kycStatus: KycVerificationStatus.SUBMITTED,
+            profileStatus: CreatorSettlementProfileStatus.REVIEW_REQUIRED,
+            rejectionReason: manualReviewReason,
+          }
+        : this.derivePayoutStateFromVerificationStatus(
+            workflowStatus,
+            AccountOwnershipType.BUSINESS,
+            existingVerification?.livenessStatus ||
+              KycVerificationStatus.NOT_STARTED,
+          );
+    const approvedTier = basicAutoApproved ? KycTierDto.BASIC : KycTierDto.NONE;
+    const kycSubmittedAt = manualReviewReason ? new Date() : null;
 
     const verification = await this.prisma.creatorKycVerification.upsert({
       where: { userId },
       update: {
+        provider: KYC_PROVIDER_DIKRIPT,
         accountOwnershipType: AccountOwnershipType.BUSINESS,
-        status: workflowStatus,
+        status: nextVerificationStatus,
         businessStatus,
-        businessReferenceHash: this.hashKycSubject(businessReference),
-        businessReferenceLast4: this.getLast4(businessReference),
+        businessReferenceHash,
+        businessReferenceLast4,
         dedupStatus: duplicateReview.status,
-        verifiedBusinessName:
-          businessResponse.cac?.companyName || dto.businessName || null,
-        qoreBusinessCheckId: String(businessResponse.id),
+        nameMatchStatus: nameMatch.status,
+        nameMatchScore: nameMatch.score,
+        nameMatchReason: nameMatch.reason,
+        verifiedBusinessName,
+        submittedAt: kycSubmittedAt,
+        reviewedAt: null,
+        qoreBusinessCheckId: businessResponse
+          ? String(businessResponse.id)
+          : existingVerification?.qoreBusinessCheckId || null,
         rejectionReason:
           businessStatus === KycVerificationStatus.REJECTED
-            ? 'QoreID could not verify the submitted business details'
-            : null,
+            ? 'Dikript could not verify the submitted business details'
+            : manualReviewReason,
         metadata: {
           ...(await this.getKycMetadata(userId)),
+          kycTier: approvedTier,
+          approvedTier,
+          targetTier: KycTierDto.BASIC,
           businessDraft: {
-            regNumber: this.maskIdentityReference(dto.regNumber),
+            regNumber: dto.regNumber,
+            regNumberMasked: this.maskIdentityReference(dto.regNumber),
             businessName: dto.businessName || null,
           },
           dedupReview: duplicateReview.metadata,
-          qoreIdBusiness: this.summarizeQoreBusinessResponse(businessResponse),
+          dikriptBusiness: businessResponse
+            ? this.summarizeDikriptBusinessResponse(businessResponse)
+            : this.normalizeJsonObject(existingVerification?.metadata)
+                .dikriptBusiness || null,
+          verificationCache: this.mergeVerificationCache(
+            existingVerification?.metadata,
+            'businessIdentity',
+            {
+              inputHash: businessInputHash,
+              provider: 'DIKRIPT',
+              requestId: businessResponse
+                ? String(businessResponse.id)
+                : existingVerification?.qoreBusinessCheckId || null,
+              status: businessStatus,
+              reused: Boolean(cachedBusiness),
+              charged: !cachedBusiness,
+              checkedAt: new Date().toISOString(),
+            },
+          ),
         },
       },
       create: {
         userId,
         settlementProfileId: payoutProfile.id,
+        provider: KYC_PROVIDER_DIKRIPT,
         accountOwnershipType: AccountOwnershipType.BUSINESS,
-        status: workflowStatus,
+        status: nextVerificationStatus,
         businessStatus,
-        businessReferenceHash: this.hashKycSubject(businessReference),
-        businessReferenceLast4: this.getLast4(businessReference),
+        businessReferenceHash,
+        businessReferenceLast4,
         dedupStatus: duplicateReview.status,
         identityStatus: KycVerificationStatus.NOT_STARTED,
         livenessStatus: KycVerificationStatus.NOT_STARTED,
-        verifiedBusinessName:
-          businessResponse.cac?.companyName || dto.businessName || null,
-        qoreBusinessCheckId: String(businessResponse.id),
+        nameMatchStatus: nameMatch.status,
+        nameMatchScore: nameMatch.score,
+        nameMatchReason: nameMatch.reason,
+        verifiedBusinessName,
+        submittedAt: kycSubmittedAt,
+        reviewedAt: null,
+        qoreBusinessCheckId: businessResponse
+          ? String(businessResponse.id)
+          : null,
         rejectionReason:
           businessStatus === KycVerificationStatus.REJECTED
-            ? 'QoreID could not verify the submitted business details'
-            : null,
+            ? 'Dikript could not verify the submitted business details'
+            : manualReviewReason,
         metadata: {
+          kycTier: approvedTier,
+          approvedTier,
+          targetTier: KycTierDto.BASIC,
           businessDraft: {
-            regNumber: this.maskIdentityReference(dto.regNumber),
+            regNumber: dto.regNumber,
+            regNumberMasked: this.maskIdentityReference(dto.regNumber),
             businessName: dto.businessName || null,
           },
           dedupReview: duplicateReview.metadata,
-          qoreIdBusiness: this.summarizeQoreBusinessResponse(businessResponse),
+          dikriptBusiness: businessResponse
+            ? this.summarizeDikriptBusinessResponse(businessResponse)
+            : null,
+          verificationCache: this.mergeVerificationCache(
+            null,
+            'businessIdentity',
+            {
+              inputHash: businessInputHash,
+              provider: 'DIKRIPT',
+              requestId: businessResponse ? String(businessResponse.id) : null,
+              status: businessStatus,
+              reused: Boolean(cachedBusiness),
+              charged: !cachedBusiness,
+              checkedAt: new Date().toISOString(),
+            },
+          ),
         },
       },
     });
 
-    await this.prisma.creatorSettlementProfile.update({
-      where: { userId },
-      data: {
-        accountOwnershipType: AccountOwnershipType.BUSINESS,
-        kycStatus: payoutState.kycStatus,
-        status: payoutState.profileStatus,
-        approvedAt: null,
-        rejectedAt: null,
-        rejectionReason: payoutState.rejectionReason,
-      },
-    });
+    const updatedPayoutProfile =
+      await this.prisma.creatorSettlementProfile.update({
+        where: { userId },
+        data: {
+          accountOwnershipType: AccountOwnershipType.BUSINESS,
+          kycStatus: payoutState.kycStatus,
+          status: payoutState.profileStatus,
+          nameMatchStatus: nameMatch.status,
+          approvedAt: basicAutoApproved
+            ? payoutProfile.approvedAt || new Date()
+            : null,
+          rejectedAt: null,
+          rejectionReason: payoutState.rejectionReason,
+          metadata: {
+            ...this.normalizeJsonObject(payoutProfile.metadata),
+            kycTier: approvedTier,
+            approvedTier,
+          },
+        },
+      });
 
     await this.syncCreatorSettlementStatus(userId, payoutState.profileStatus);
 
-    return this.formatKyc(verification);
+    return this.formatKyc(
+      verification,
+      updatedPayoutProfile,
+      await this.getKycTierSummary(userId, verification, updatedPayoutProfile),
+    );
   }
 
   async startBusinessRepresentativeKyc(
@@ -1534,6 +2391,10 @@ export class WalletService {
       throw new NotFoundException('Business KYC profile not found');
     }
 
+    const verificationMetadata = this.normalizeJsonObject(
+      verification.metadata,
+    );
+
     await this.assertNoDuplicatePayoutAccount(
       userId,
       payoutProfile.bankCode,
@@ -1554,6 +2415,28 @@ export class WalletService {
       );
     }
 
+    if (verification.nameMatchStatus === NameMatchStatus.MISMATCH) {
+      throw new BadRequestException(
+        'Business name must match the payout account before representative verification can start',
+      );
+    }
+
+    if (verification.nameMatchStatus === NameMatchStatus.NOT_CHECKED) {
+      throw new BadRequestException(
+        'Business name match must be checked before representative verification can start',
+      );
+    }
+
+    const storedBusinessRegNumber = this.resolveStoredBusinessRegNumber(
+      verification.metadata,
+    );
+
+    if (!storedBusinessRegNumber) {
+      throw new BadRequestException(
+        'Business CAC registration must be refreshed before representative verification can start',
+      );
+    }
+
     const representativeNames = this.resolveIdentityNames(
       dto.representativeFirstName,
       dto.representativeLastName,
@@ -1570,23 +2453,166 @@ export class WalletService {
     }
 
     const verificationMode = this.resolveBusinessVerificationMode(dto);
-    const representativeResponse =
-      await this.verifyBusinessRepresentativeWithQoreId({
-        verificationMode,
-        dto,
-        representativeNames,
-        user,
-      });
+    const identityReference = this.resolveIdentityReferenceFromMode(
+      verificationMode,
+      dto,
+    );
+    this.assertIdentityReferenceIsLocallyValid(
+      verificationMode,
+      identityReference,
+    );
+    const representativeInputHash = this.hashVerificationInput(
+      'businessRepresentative',
+      verificationMode,
+      identityReference,
+    );
+    const cachedRepresentative = this.getCachedVerificationAttempt(
+      verification.metadata,
+      'businessRepresentative',
+      representativeInputHash,
+    );
+    let representativeResponse: DikriptNinResponse | null = null;
+    let identityStatus = cachedRepresentative
+      ? verification.identityStatus
+      : KycVerificationStatus.NOT_STARTED;
+    let identityRecord: any = null;
+    let verifiedRepresentativeName = cachedRepresentative
+      ? verification.verifiedFullName
+      : null;
+    let verifiedRepresentativeDateOfBirth = cachedRepresentative
+      ? verification.verifiedDateOfBirth
+      : null;
+    let providerSubject: string | null = null;
 
-    if (!representativeResponse) {
-      throw new BadRequestException(
-        'Representative phone number, NIN, vNIN, or passport number is required for business KYC',
+    if (!cachedRepresentative) {
+      representativeResponse =
+        await this.verifyBusinessRepresentativeWithDikript({
+          verificationMode,
+          dto,
+          representativeNames,
+          user,
+        });
+
+      if (!representativeResponse) {
+        throw new BadRequestException(
+          'Representative NIN, BVN, or phone number is required for business KYC',
+        );
+      }
+
+      identityStatus = this.resolveDikriptIdentityStatus(
+        representativeResponse,
       );
+      identityRecord = this.extractIdentityRecord(representativeResponse);
+      verifiedRepresentativeName = this.combineNameParts(
+        identityRecord?.firstname,
+        identityRecord?.middlename,
+        identityRecord?.lastname,
+      );
+      verifiedRepresentativeDateOfBirth = this.parseDate(
+        identityRecord?.birthdate || dto.representativeDateOfBirth || null,
+      );
+      providerSubject = this.extractProviderSubject(representativeResponse);
     }
 
-    const identityStatus = this.resolveQoreIdIdentityStatus(
-      representativeResponse,
+    const identityType = this.resolveIdentityTypeFromMode(verificationMode);
+    const providerSubjectHash = cachedRepresentative
+      ? verification.providerSubjectHash || null
+      : this.hashKycSubject(providerSubject);
+    const providerSubjectLast4 = cachedRepresentative
+      ? verification.providerSubjectLast4 || null
+      : this.getLast4(providerSubject);
+    const nameDobHash = this.hashNameDob(
+      verifiedRepresentativeName,
+      verifiedRepresentativeDateOfBirth,
     );
+    const duplicateReview = cachedRepresentative
+      ? {
+          status: verification.dedupStatus || KycVerificationStatus.NOT_STARTED,
+          reason: null,
+          metadata: this.normalizeJsonObject(verificationMetadata.dedupReview),
+        }
+      : await this.detectDuplicateKycSignals({
+          userId,
+          providerSubjectHash,
+          businessReferenceHash: verification.businessReferenceHash || null,
+          nameDobHash,
+        });
+    const businessOwnershipInputHash = this.hashVerificationInput(
+      'businessOwnership',
+      'CAC_ADVANCED',
+      `${storedBusinessRegNumber}|${verifiedRepresentativeName || ''}`,
+    );
+    const cachedBusinessOwnership = this.getCachedVerificationAttempt(
+      verification.metadata,
+      'businessOwnership',
+      businessOwnershipInputHash,
+    );
+    let businessAdvancedResponse: DikriptCacResponse | null = null;
+    let businessAdvancedStatus = cachedBusinessOwnership
+      ? (cachedBusinessOwnership.businessStatus as KycVerificationStatus) ||
+        KycVerificationStatus.NOT_STARTED
+      : KycVerificationStatus.NOT_STARTED;
+    let representativeOwnershipMatch = cachedBusinessOwnership
+      ? {
+          status:
+            (cachedBusinessOwnership.matchStatus as NameMatchStatus) ||
+            NameMatchStatus.NOT_CHECKED,
+          score: Number(cachedBusinessOwnership.matchScore || 0),
+          reason:
+            typeof cachedBusinessOwnership.reason === 'string'
+              ? cachedBusinessOwnership.reason
+              : 'Reused previous CAC director match',
+          matchedName:
+            typeof cachedBusinessOwnership.matchedName === 'string'
+              ? cachedBusinessOwnership.matchedName
+              : null,
+          matchedRole:
+            typeof cachedBusinessOwnership.matchedRole === 'string'
+              ? cachedBusinessOwnership.matchedRole
+              : null,
+        }
+      : null;
+
+    if (
+      identityStatus === KycVerificationStatus.VERIFIED &&
+      !cachedBusinessOwnership
+    ) {
+      businessAdvancedResponse = await this.dikriptService.verifyCacAdvanced({
+        regNumber: storedBusinessRegNumber,
+      });
+      businessAdvancedStatus = this.resolveDikriptBusinessStatus(
+        businessAdvancedResponse,
+      );
+      representativeOwnershipMatch =
+        businessAdvancedStatus === KycVerificationStatus.VERIFIED
+          ? this.evaluateBusinessRepresentativeDirectorMatch({
+              representativeName: verifiedRepresentativeName,
+              businessResponse: businessAdvancedResponse,
+            })
+          : {
+              status: NameMatchStatus.MISMATCH,
+              score: 0,
+              reason:
+                'CAC advanced director check could not verify the business',
+              matchedName: null,
+              matchedRole: null,
+            };
+    }
+
+    if (identityStatus === KycVerificationStatus.VERIFIED) {
+      if (businessAdvancedStatus !== KycVerificationStatus.VERIFIED) {
+        identityStatus = KycVerificationStatus.REJECTED;
+      } else if (
+        representativeOwnershipMatch?.status === NameMatchStatus.MISMATCH
+      ) {
+        identityStatus = KycVerificationStatus.REJECTED;
+      } else if (
+        representativeOwnershipMatch?.status === NameMatchStatus.REVIEW_REQUIRED
+      ) {
+        identityStatus = KycVerificationStatus.SUBMITTED;
+      }
+    }
+
     const workflowStatus = this.deriveVerificationWorkflowStatus({
       accountOwnershipType: AccountOwnershipType.BUSINESS,
       businessStatus: verification.businessStatus,
@@ -1598,35 +2624,65 @@ export class WalletService {
       AccountOwnershipType.BUSINESS,
       KycVerificationStatus.NOT_STARTED,
     );
-    const identityRecord = this.extractIdentityRecord(representativeResponse);
-    const verifiedRepresentativeName = this.combineNameParts(
-      identityRecord?.firstname,
-      identityRecord?.middlename,
-      identityRecord?.lastname,
-    );
-    const verifiedRepresentativeDateOfBirth = this.parseDate(
-      identityRecord?.birthdate || dto.representativeDateOfBirth || null,
-    );
-    const identityType = this.resolveIdentityTypeFromMode(verificationMode);
-    const identityReference = this.resolveIdentityReferenceFromMode(
-      verificationMode,
-      dto,
-    );
-    const providerSubject = this.extractProviderSubject(representativeResponse);
-    const duplicateReview = await this.detectDuplicateKycSignals({
-      userId,
-      providerSubjectHash: this.hashKycSubject(providerSubject),
-      businessReferenceHash: verification.businessReferenceHash || null,
-      nameDobHash: this.hashNameDob(
-        verifiedRepresentativeName,
-        verifiedRepresentativeDateOfBirth,
-      ),
+    const existingTier = this.resolveKycTier(verification, payoutProfile);
+    const shouldPreserveBasicTier =
+      existingTier === KycTierDto.BASIC &&
+      payoutProfile.status === CreatorSettlementProfileStatus.ACTIVE;
+    const fullAutoApproved = this.canAutoApproveKycTier({
+      targetTier: KycTierDto.FULL,
+      accountOwnershipType: AccountOwnershipType.BUSINESS,
+      businessStatus: verification.businessStatus,
+      identityStatus,
+      livenessStatus: KycVerificationStatus.NOT_STARTED,
+      nameMatchStatus: verification.nameMatchStatus,
+      dedupStatus: duplicateReview.status,
     });
+    const representativeManualReviewReason =
+      identityStatus === KycVerificationStatus.SUBMITTED ||
+      duplicateReview.status === KycVerificationStatus.SUBMITTED
+        ? duplicateReview.reason ||
+          representativeOwnershipMatch?.reason ||
+          'Representative relationship needs manual review before Full KYC can be approved.'
+        : null;
+    const nextTier = fullAutoApproved
+      ? KycTierDto.FULL
+      : shouldPreserveBasicTier
+        ? KycTierDto.BASIC
+        : KycTierDto.NONE;
+    const nextVerificationStatus =
+      identityStatus === KycVerificationStatus.REJECTED &&
+      !shouldPreserveBasicTier
+        ? KycVerificationStatus.REJECTED
+        : fullAutoApproved
+          ? KycVerificationStatus.VERIFIED
+          : representativeManualReviewReason
+            ? KycVerificationStatus.SUBMITTED
+            : shouldPreserveBasicTier
+              ? KycVerificationStatus.VERIFIED
+              : workflowStatus;
+    const nextPayoutState =
+      fullAutoApproved || shouldPreserveBasicTier
+        ? {
+            kycStatus: KycVerificationStatus.VERIFIED,
+            profileStatus: CreatorSettlementProfileStatus.ACTIVE,
+            rejectionReason: null,
+          }
+        : representativeManualReviewReason
+          ? {
+              kycStatus: KycVerificationStatus.SUBMITTED,
+              profileStatus: CreatorSettlementProfileStatus.REVIEW_REQUIRED,
+              rejectionReason: representativeManualReviewReason,
+            }
+          : payoutState;
+    const kycSubmittedAt = representativeManualReviewReason
+      ? new Date()
+      : verification.submittedAt || null;
 
     const updatedVerification = await this.prisma.creatorKycVerification.update(
       {
         where: { userId },
         data: {
+          provider: KYC_PROVIDER_DIKRIPT,
           accountOwnershipType: AccountOwnershipType.BUSINESS,
           verificationMode,
           phoneNumber:
@@ -1635,67 +2691,138 @@ export class WalletService {
           identityReferenceMasked:
             this.maskIdentityReference(identityReference),
           identityReferenceLast4: this.getLast4(identityReference),
-          providerSubjectHash: this.hashKycSubject(providerSubject),
-          providerSubjectLast4: this.getLast4(providerSubject),
-          status: workflowStatus,
+          providerSubjectHash,
+          providerSubjectLast4,
+          status: nextVerificationStatus,
           identityStatus,
           livenessStatus: KycVerificationStatus.NOT_STARTED,
           qoreLivenessCheckId: null,
           dedupStatus: duplicateReview.status,
-          nameMatchStatus: NameMatchStatus.NOT_CHECKED,
+          nameMatchStatus: verification.nameMatchStatus,
           verifiedFullName: verifiedRepresentativeName,
           verifiedDateOfBirth: verifiedRepresentativeDateOfBirth,
-          nameDobHash: this.hashNameDob(
-            verifiedRepresentativeName,
-            verifiedRepresentativeDateOfBirth,
-          ),
-          qoreIdentityCheckId: String(representativeResponse.id),
+          nameDobHash,
+          submittedAt: kycSubmittedAt,
+          reviewedAt: representativeManualReviewReason
+            ? null
+            : verification.reviewedAt,
+          qoreIdentityCheckId: representativeResponse
+            ? String(representativeResponse.id)
+            : verification.qoreIdentityCheckId || null,
           rejectionReason:
             identityStatus === KycVerificationStatus.REJECTED
-              ? 'QoreID could not verify the submitted representative details'
-              : null,
+              ? representativeOwnershipMatch?.reason ||
+                'Dikript could not verify the submitted representative details'
+              : representativeManualReviewReason,
           metadata: {
             ...(await this.getKycMetadata(userId)),
+            kycTier: nextTier,
+            approvedTier: nextTier,
+            targetTier: KycTierDto.FULL,
             businessDraft: {
-              ...(await this.getKycMetadataSection(userId, 'businessDraft')),
+              ...this.normalizeJsonObject(verificationMetadata.businessDraft),
+              regNumber: storedBusinessRegNumber,
+              regNumberMasked: this.maskIdentityReference(
+                storedBusinessRegNumber,
+              ),
               representativeFirstName: representativeNames.firstName,
               representativeLastName: representativeNames.lastName,
               representativeDateOfBirth: dto.representativeDateOfBirth || null,
-            representativePhoneNumber: dto.representativePhoneNumber || null,
-            representativeIdentityReference:
-              this.maskIdentityReference(identityReference),
-          },
-          dedupReview: duplicateReview.metadata,
-          qoreIdRepresentative: this.summarizeQoreNinResponse(
-            representativeResponse,
-            {
-              verificationMode,
-              identityType,
+              representativePhoneNumber: dto.representativePhoneNumber || null,
+              representativeIdentityReference:
+                this.maskIdentityReference(identityReference),
+            },
+            dedupReview: duplicateReview.metadata,
+            businessRepresentativeMatch: representativeOwnershipMatch,
+            dikriptRepresentative: representativeResponse
+              ? this.summarizeDikriptIdentityResponse(representativeResponse, {
+                  verificationMode,
+                  identityType,
+                })
+              : verificationMetadata.dikriptRepresentative || null,
+            dikriptBusinessAdvanced: businessAdvancedResponse
+              ? this.summarizeDikriptBusinessResponse(businessAdvancedResponse)
+              : verificationMetadata.dikriptBusinessAdvanced || null,
+            verificationCache: {
+              ...this.normalizeJsonObject(
+                verificationMetadata.verificationCache,
+              ),
+              businessRepresentative: {
+                inputHash: representativeInputHash,
+                provider: 'DIKRIPT',
+                requestId: representativeResponse
+                  ? String(representativeResponse.id)
+                  : verification.qoreIdentityCheckId || null,
+                status: identityStatus,
+                reused: Boolean(cachedRepresentative),
+                charged: !cachedRepresentative,
+                checkedAt: new Date().toISOString(),
               },
-            ),
+              ...(representativeOwnershipMatch || cachedBusinessOwnership
+                ? {
+                    businessOwnership: {
+                      inputHash: businessOwnershipInputHash,
+                      provider: 'DIKRIPT',
+                      requestId: businessAdvancedResponse
+                        ? String(businessAdvancedResponse.id)
+                        : cachedBusinessOwnership?.requestId || null,
+                      businessStatus: businessAdvancedStatus,
+                      matchStatus:
+                        representativeOwnershipMatch?.status ||
+                        NameMatchStatus.NOT_CHECKED,
+                      matchScore: representativeOwnershipMatch?.score || 0,
+                      matchedName:
+                        representativeOwnershipMatch?.matchedName || null,
+                      matchedRole:
+                        representativeOwnershipMatch?.matchedRole || null,
+                      reason: representativeOwnershipMatch?.reason || null,
+                      reused: Boolean(cachedBusinessOwnership),
+                      charged: Boolean(businessAdvancedResponse),
+                      checkedAt: new Date().toISOString(),
+                    },
+                  }
+                : {}),
+            },
           },
         },
       },
     );
 
-    await this.prisma.creatorSettlementProfile.update({
-      where: { userId },
-      data: {
-        accountOwnershipType: AccountOwnershipType.BUSINESS,
-        kycStatus: payoutState.kycStatus,
-        status: payoutState.profileStatus,
-        approvedAt: null,
-        rejectedAt: null,
-        rejectionReason:
-          identityStatus === KycVerificationStatus.REJECTED
-            ? 'Representative identity verification failed. Review submitted details and retry.'
-            : payoutState.rejectionReason,
-      },
-    });
+    const updatedPayoutProfile =
+      await this.prisma.creatorSettlementProfile.update({
+        where: { userId },
+        data: {
+          accountOwnershipType: AccountOwnershipType.BUSINESS,
+          kycStatus: nextPayoutState.kycStatus,
+          status: nextPayoutState.profileStatus,
+          approvedAt:
+            fullAutoApproved || shouldPreserveBasicTier
+              ? payoutProfile.approvedAt || new Date()
+              : null,
+          rejectedAt: null,
+          rejectionReason: nextPayoutState.rejectionReason,
+          metadata: {
+            ...this.normalizeJsonObject(payoutProfile.metadata),
+            kycTier: nextTier,
+            approvedTier: nextTier,
+          },
+        },
+      });
 
-    await this.syncCreatorSettlementStatus(userId, payoutState.profileStatus);
+    await this.syncCreatorSettlementStatus(
+      userId,
+      nextPayoutState.profileStatus,
+    );
 
-    return this.formatKyc(updatedVerification);
+    return this.formatKyc(
+      updatedVerification,
+      updatedPayoutProfile,
+      await this.getKycTierSummary(
+        userId,
+        updatedVerification,
+        updatedPayoutProfile,
+      ),
+    );
   }
 
   async submitKyc(userId: string, dto: SubmitKycDto) {
@@ -1716,6 +2843,12 @@ export class WalletService {
       throw new NotFoundException('KYC profile not found');
     }
 
+    const targetTier =
+      dto.targetTier === KycTierDto.FULL ? KycTierDto.FULL : KycTierDto.BASIC;
+    const requiresIdentityForTargetTier =
+      verification.accountOwnershipType !== AccountOwnershipType.BUSINESS ||
+      targetTier === KycTierDto.FULL;
+
     if (
       verification.accountOwnershipType === AccountOwnershipType.BUSINESS &&
       verification.businessStatus !== KycVerificationStatus.VERIFIED
@@ -1733,38 +2866,46 @@ export class WalletService {
       );
     }
 
-    if (verification.identityStatus !== KycVerificationStatus.VERIFIED) {
+    if (
+      requiresIdentityForTargetTier &&
+      verification.identityStatus !== KycVerificationStatus.VERIFIED &&
+      !(
+        verification.accountOwnershipType === AccountOwnershipType.BUSINESS &&
+        targetTier === KycTierDto.FULL &&
+        verification.identityStatus === KycVerificationStatus.SUBMITTED
+      )
+    ) {
       if (
         verification.identityStatus === KycVerificationStatus.PENDING_PROVIDER
       ) {
         throw new BadRequestException(
-          'Identity verification is still pending provider response',
+          verification.accountOwnershipType === AccountOwnershipType.BUSINESS
+            ? 'Representative verification is still pending provider response'
+            : 'Identity verification is still pending provider response',
         );
       }
 
       throw new BadRequestException(
-        'Identity verification must pass before KYC can be submitted',
+        verification.accountOwnershipType === AccountOwnershipType.BUSINESS
+          ? 'Representative verification must pass before Full KYC can be submitted'
+          : 'Identity verification must pass before KYC can be submitted',
       );
     }
 
-    if (
-      verification.livenessStatus === KycVerificationStatus.PENDING_PROVIDER
-    ) {
-      throw new BadRequestException(
-        'Face verification is still pending provider response',
-      );
-    }
+    if (targetTier === KycTierDto.FULL) {
+      if (
+        verification.livenessStatus === KycVerificationStatus.PENDING_PROVIDER
+      ) {
+        throw new BadRequestException(
+          'Face verification is still pending provider response',
+        );
+      }
 
-    if (verification.livenessStatus === KycVerificationStatus.REJECTED) {
-      throw new BadRequestException(
-        'Face verification must pass before KYC can be submitted',
-      );
-    }
-
-    if (verification.livenessStatus === KycVerificationStatus.NOT_STARTED) {
-      throw new BadRequestException(
-        'Liveness submission is required before KYC can be submitted',
-      );
+      if (verification.livenessStatus !== KycVerificationStatus.VERIFIED) {
+        throw new BadRequestException(
+          'Face verification must pass before Full KYC can be submitted',
+        );
+      }
     }
 
     const nameMatch = this.evaluateSettlementNameMatch({
@@ -1773,25 +2914,45 @@ export class WalletService {
       verifiedFullName: verification.verifiedFullName,
       verifiedBusinessName: verification.verifiedBusinessName,
     });
+
+    if (nameMatch.status === NameMatchStatus.MISMATCH) {
+      throw new BadRequestException(
+        'Payout account name does not match the verified KYC details. Update the payout account or verification details before submitting.',
+      );
+    }
+
     const requiresDuplicateReview =
       verification.dedupStatus === KycVerificationStatus.SUBMITTED;
     const duplicateReviewReason = requiresDuplicateReview
       ? 'This verification requires manual review before payouts can be activated.'
       : null;
-    const nextPayoutProfileStatus = requiresDuplicateReview
-      ? CreatorSettlementProfileStatus.REVIEW_REQUIRED
-      : CreatorSettlementProfileStatus.PENDING_KYC;
+    const nextPayoutProfileStatus =
+      requiresDuplicateReview ||
+      nameMatch.status === NameMatchStatus.REVIEW_REQUIRED
+        ? CreatorSettlementProfileStatus.REVIEW_REQUIRED
+        : CreatorSettlementProfileStatus.PENDING_KYC;
+    const existingMetadata = await this.getKycMetadata(userId);
 
     const updatedVerification = await this.prisma.creatorKycVerification.update(
       {
         where: { userId },
         data: {
+          provider: KYC_PROVIDER_DIKRIPT,
           status: KycVerificationStatus.SUBMITTED,
           submittedAt: new Date(),
           nameMatchStatus: nameMatch.status,
           nameMatchScore: nameMatch.score,
           nameMatchReason: nameMatch.reason,
           rejectionReason: duplicateReviewReason,
+          metadata: {
+            ...existingMetadata,
+            targetTier,
+            flow: {
+              ...this.normalizeJsonObject(existingMetadata.flow),
+              submittedTargetTier: targetTier,
+              submittedAt: new Date().toISOString(),
+            },
+          },
         },
       },
     );
@@ -1804,20 +2965,17 @@ export class WalletService {
         nameMatchStatus: nameMatch.status,
         approvedAt: null,
         rejectedAt: null,
-        rejectionReason:
-          duplicateReviewReason ||
-          (nameMatch.status === NameMatchStatus.MISMATCH
-            ? 'Payout account name does not match verified identity'
-            : null),
+        rejectionReason: duplicateReviewReason,
       },
     });
 
-    await this.syncCreatorSettlementStatus(
-      userId,
-      nextPayoutProfileStatus,
-    );
+    await this.syncCreatorSettlementStatus(userId, nextPayoutProfileStatus);
 
-    return this.formatKyc(updatedVerification);
+    return this.formatKyc(
+      updatedVerification,
+      payoutProfile,
+      await this.getKycTierSummary(userId, updatedVerification, payoutProfile),
+    );
   }
 
   async notifyOnKycResolution(userId: string, dto: NotifyOnKycResolutionDto) {
@@ -1919,6 +3077,45 @@ export class WalletService {
 
     const nextKycStatus = dto.status as KycVerificationStatus;
     const nextNameMatchStatus = dto.nameMatchStatus as NameMatchStatus;
+    const existingVerificationMetadata = this.normalizeJsonObject(
+      existingVerification.metadata,
+    );
+    const existingPayoutMetadata = this.normalizeJsonObject(
+      payoutProfile.metadata,
+    );
+    const requestedApprovedTier =
+      dto.approvedTier === KycTierDto.FULL ||
+      existingVerificationMetadata.targetTier === KycTierDto.FULL
+        ? KycTierDto.FULL
+        : KycTierDto.BASIC;
+
+    if (
+      nextKycStatus === KycVerificationStatus.VERIFIED &&
+      requestedApprovedTier === KycTierDto.FULL &&
+      existingVerification.accountOwnershipType ===
+        AccountOwnershipType.BUSINESS &&
+      existingVerification.identityStatus !== KycVerificationStatus.VERIFIED &&
+      existingVerification.identityStatus !== KycVerificationStatus.SUBMITTED
+    ) {
+      throw new BadRequestException(
+        'Full business KYC approval requires verified representative identity',
+      );
+    }
+
+    if (
+      nextKycStatus === KycVerificationStatus.VERIFIED &&
+      requestedApprovedTier === KycTierDto.FULL &&
+      existingVerification.livenessStatus !== KycVerificationStatus.VERIFIED
+    ) {
+      throw new BadRequestException(
+        'Full KYC approval requires a verified liveness check',
+      );
+    }
+
+    const approvedTier =
+      nextKycStatus === KycVerificationStatus.VERIFIED
+        ? requestedApprovedTier
+        : KycTierDto.NONE;
     const nextPayoutStatus =
       nextKycStatus === KycVerificationStatus.VERIFIED &&
       nextNameMatchStatus === NameMatchStatus.MATCHED
@@ -1940,11 +3137,15 @@ export class WalletService {
               ? KycVerificationStatus.VERIFIED
               : existingVerification.businessStatus,
           identityStatus:
-            nextKycStatus === KycVerificationStatus.VERIFIED
+            nextKycStatus === KycVerificationStatus.VERIFIED &&
+            (existingVerification.accountOwnershipType !==
+              AccountOwnershipType.BUSINESS ||
+              approvedTier === KycTierDto.FULL)
               ? KycVerificationStatus.VERIFIED
               : existingVerification.identityStatus,
           livenessStatus:
-            nextKycStatus === KycVerificationStatus.VERIFIED
+            nextKycStatus === KycVerificationStatus.VERIFIED &&
+            approvedTier === KycTierDto.FULL
               ? KycVerificationStatus.VERIFIED
               : existingVerification.livenessStatus,
           amlStatus:
@@ -1961,6 +3162,22 @@ export class WalletService {
           nameMatchReason: dto.note || null,
           reviewedAt: new Date(),
           rejectionReason: dto.rejectionReason || null,
+          metadata: {
+            ...existingVerificationMetadata,
+            kycTier: approvedTier,
+            approvedTier,
+            targetTier:
+              approvedTier === KycTierDto.NONE
+                ? existingVerificationMetadata.targetTier || KycTierDto.BASIC
+                : approvedTier,
+            review: {
+              reviewedAt: new Date().toISOString(),
+              status: nextKycStatus,
+              nameMatchStatus: nextNameMatchStatus,
+              note: dto.note || null,
+              approvedTier,
+            },
+          },
         },
       }),
       this.prisma.creatorSettlementProfile.update({
@@ -1978,13 +3195,22 @@ export class WalletService {
               ? new Date()
               : null,
           rejectionReason: dto.rejectionReason || null,
+          metadata: {
+            ...existingPayoutMetadata,
+            kycTier: approvedTier,
+            approvedTier,
+          },
         },
       }),
     ]);
 
     await this.syncCreatorSettlementStatus(userId, nextPayoutStatus);
 
-    return this.formatKyc(verification);
+    return this.formatKyc(
+      verification,
+      payoutProfile,
+      await this.getKycTierSummary(userId, verification, payoutProfile),
+    );
   }
 
   async upsertAlatProfile(
@@ -2001,6 +3227,14 @@ export class WalletService {
           accountNumber: true,
           accountName: true,
           status: true,
+          metadata: true,
+          kycVerification: {
+            select: {
+              metadata: true,
+              status: true,
+              livenessStatus: true,
+            },
+          },
         },
       },
     );
@@ -2030,6 +3264,16 @@ export class WalletService {
     ) {
       throw new BadRequestException(
         'Creator payout profile must be active before ALAT transfer can be enabled',
+      );
+    }
+
+    if (
+      status === CreatorAlatProfileStatus.ACTIVE &&
+      this.resolveKycTier(payoutProfile?.kycVerification, payoutProfile) !==
+        KycTierDto.FULL
+    ) {
+      throw new BadRequestException(
+        'Creator must complete Full KYC before ALAT transfer can be enabled',
       );
     }
 
@@ -2078,6 +3322,17 @@ export class WalletService {
 
   async getTransactionHistory(userId: string, dto: WalletTransactionsQueryDto) {
     await this.backfillCreatorTransactions(userId);
+    const payoutProfile = await this.prisma.creatorSettlementProfile.findUnique(
+      {
+        where: { userId },
+        select: { status: true },
+      },
+    );
+
+    if (payoutProfile?.status === CreatorSettlementProfileStatus.ACTIVE) {
+      await this.syncCreatorSettlementStatus(userId, payoutProfile.status);
+    }
+
     const page = dto.page || 1;
     const pageSize = Math.min(dto.pageSize || 20, 50);
     const skip = (page - 1) * pageSize;
@@ -2177,6 +3432,8 @@ export class WalletService {
     if (payoutProfile.status !== CreatorSettlementProfileStatus.ACTIVE) {
       throw new BadRequestException('Creator payout profile is not active');
     }
+
+    await this.syncCreatorSettlementStatus(creatorId, payoutProfile.status);
 
     if (
       !payoutProfile.bankName ||
@@ -2336,19 +3593,15 @@ export class WalletService {
     await this.backfillCreatorTransactions(creatorId);
 
     if (profileStatus === CreatorSettlementProfileStatus.ACTIVE) {
-      await this.prisma.transactionReference.updateMany({
-        where: {
-          creatorId,
-          status: TransactionStatusType.SUCCESS,
-          settlementStatus: {
-            in: [SettlementStatus.HELD_KYC, SettlementStatus.NOT_READY],
-          },
-          riskStatus: RiskStatus.CLEAR,
-        },
-        data: {
-          settlementStatus: SettlementStatus.READY,
-        },
-      });
+      const payoutProfile =
+        await this.prisma.creatorSettlementProfile.findUnique({
+          where: { userId: creatorId },
+          include: { kycVerification: true },
+        });
+      const kycTier = this.resolveKycTier(
+        payoutProfile?.kycVerification,
+        payoutProfile,
+      );
 
       await this.prisma.transactionReference.updateMany({
         where: {
@@ -2365,6 +3618,26 @@ export class WalletService {
           settlementStatus: SettlementStatus.HELD_RISK,
         },
       });
+
+      if (kycTier === KycTierDto.FULL) {
+        await this.prisma.transactionReference.updateMany({
+          where: {
+            creatorId,
+            status: TransactionStatusType.SUCCESS,
+            settlementStatus: {
+              in: [SettlementStatus.HELD_KYC, SettlementStatus.NOT_READY],
+            },
+            riskStatus: RiskStatus.CLEAR,
+          },
+          data: {
+            settlementStatus: SettlementStatus.READY,
+          },
+        });
+
+        return;
+      }
+
+      await this.applyBasicKycSettlementCap(creatorId);
 
       return;
     }
@@ -2383,11 +3656,79 @@ export class WalletService {
     });
   }
 
+  private async applyBasicKycSettlementCap(creatorId: string) {
+    const committedAggregate = await this.prisma.transactionReference.aggregate(
+      {
+        _sum: { creatorPayable: true },
+        where: {
+          creatorId,
+          status: TransactionStatusType.SUCCESS,
+          settlementStatus: {
+            in: [SettlementStatus.PROCESSING, SettlementStatus.SETTLED],
+          },
+        },
+      },
+    );
+    let committedKobo = committedAggregate._sum.creatorPayable || 0;
+
+    const clearTransactions = await this.prisma.transactionReference.findMany({
+      where: {
+        creatorId,
+        status: TransactionStatusType.SUCCESS,
+        riskStatus: RiskStatus.CLEAR,
+        settlementStatus: {
+          in: [
+            SettlementStatus.HELD_KYC,
+            SettlementStatus.NOT_READY,
+            SettlementStatus.READY,
+          ],
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    for (const transaction of clearTransactions) {
+      const creatorPayableKobo = this.resolveCreatorPayableKobo(transaction);
+      const shouldRelease =
+        committedKobo + creatorPayableKobo <= BASIC_KYC_SETTLEMENT_CAP_KOBO;
+      const nextStatus = shouldRelease
+        ? SettlementStatus.READY
+        : SettlementStatus.HELD_KYC;
+
+      if (shouldRelease) {
+        committedKobo += creatorPayableKobo;
+      }
+
+      if (transaction.settlementStatus === nextStatus) {
+        continue;
+      }
+
+      const metadata = this.normalizeJsonObject(transaction.metadata);
+      await this.prisma.transactionReference.update({
+        where: { id: transaction.id },
+        data: {
+          settlementStatus: nextStatus,
+          metadata: {
+            ...metadata,
+            tierHold:
+              nextStatus === SettlementStatus.HELD_KYC
+                ? {
+                    reason: 'BASIC_TIER_CAP_REACHED',
+                    capKobo: BASIC_KYC_SETTLEMENT_CAP_KOBO,
+                    evaluatedAt: new Date().toISOString(),
+                  }
+                : null,
+          },
+        },
+      });
+    }
+  }
+
   private async backfillCreatorTransactions(creatorId: string) {
     const payoutProfile = await this.prisma.creatorSettlementProfile.findUnique(
       {
         where: { userId: creatorId },
-        select: { status: true },
+        include: { kycVerification: true },
       },
     );
 
@@ -2436,9 +3777,20 @@ export class WalletService {
         transaction.paymentType,
         metadata,
       );
+      const payoutIsActive =
+        payoutProfile?.status === CreatorSettlementProfileStatus.ACTIVE;
+      const creatorKycTier = this.resolveKycTier(
+        payoutProfile?.kycVerification,
+        payoutProfile,
+      );
       const shouldBeReady =
-        payoutProfile?.status === CreatorSettlementProfileStatus.ACTIVE &&
+        payoutIsActive &&
+        creatorKycTier === KycTierDto.FULL &&
         transaction.riskStatus === RiskStatus.CLEAR;
+      const shouldHoldRisk =
+        payoutIsActive &&
+        (transaction.riskStatus === RiskStatus.REVIEW ||
+          transaction.riskStatus === RiskStatus.HOLD);
       const inferredSettlementStatus =
         transaction.status !== TransactionStatusType.SUCCESS
           ? transaction.settlementStatus
@@ -2446,7 +3798,7 @@ export class WalletService {
               transaction.settlementStatus === SettlementStatus.HELD_KYC
             ? shouldBeReady
               ? SettlementStatus.READY
-              : payoutProfile?.status === CreatorSettlementProfileStatus.ACTIVE
+              : shouldHoldRisk
                 ? SettlementStatus.HELD_RISK
                 : SettlementStatus.HELD_KYC
             : transaction.settlementStatus;
@@ -2551,6 +3903,240 @@ export class WalletService {
     return calculatePlatformFeeKobo(grossAmountKobo);
   }
 
+  private normalizeJsonObject(value?: Prisma.JsonValue | unknown) {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? { ...(value as Record<string, any>) }
+      : {};
+  }
+
+  private canReusePayoutVerification(
+    existingProfile: any,
+    ownershipType: AccountOwnershipType,
+    bankCode?: string | null,
+    accountNumber?: string | null,
+  ) {
+    return Boolean(
+      existingProfile?.accountVerifiedAt &&
+        existingProfile.accountName &&
+        existingProfile.accountOwnershipType === ownershipType &&
+        existingProfile.bankCode === bankCode &&
+        existingProfile.accountNumber === accountNumber,
+    );
+  }
+
+  private isPayoutAccountConfirmed(profile?: any | null) {
+    if (!this.hasVerifiedPayoutAccount(profile)) {
+      return false;
+    }
+
+    const confirmation = this.normalizeJsonObject(
+      profile.metadata,
+    ).accountNameConfirmation;
+    if (
+      !confirmation ||
+      typeof confirmation !== 'object' ||
+      Array.isArray(confirmation)
+    ) {
+      return false;
+    }
+
+    return (
+      confirmation.bankCode === profile.bankCode &&
+      confirmation.accountNumberHash ===
+        this.hashKycSubject(profile.accountNumber)
+    );
+  }
+
+  private hasVerifiedPayoutAccount(profile?: any | null) {
+    return Boolean(profile?.accountVerifiedAt && profile.accountName);
+  }
+
+  private resolveKycTier(
+    verification?: any | null,
+    payoutProfile?: any | null,
+  ) {
+    const verificationMetadata = this.normalizeJsonObject(
+      verification?.metadata,
+    );
+    const payoutMetadata = this.normalizeJsonObject(payoutProfile?.metadata);
+    const tier =
+      verificationMetadata.kycTier ||
+      verificationMetadata.approvedTier ||
+      payoutMetadata.kycTier ||
+      payoutMetadata.approvedTier;
+
+    if (tier === KycTierDto.FULL || tier === KycTierDto.BASIC) {
+      return tier as KycTier;
+    }
+
+    return KycTierDto.NONE;
+  }
+
+  private buildStaticKycTierSummary(
+    verification?: any | null,
+    payoutProfile?: any | null,
+  ): KycTierSummary {
+    return {
+      kycTier: this.resolveKycTier(verification, payoutProfile),
+      basicKycSettlementCap: BASIC_KYC_SETTLEMENT_CAP_KOBO / 100,
+      basicKycSettlementUsage: 0,
+      basicKycSettlementRemaining: BASIC_KYC_SETTLEMENT_CAP_KOBO / 100,
+      livenessRequired: false,
+      livenessRequiredReason: null,
+    };
+  }
+
+  private async getKycTierSummary(
+    userId: string,
+    verification?: any | null,
+    payoutProfile?: any | null,
+  ): Promise<KycTierSummary> {
+    const [usageKobo, heldClearKobo] = await Promise.all([
+      this.calculateBasicKycExposureKobo(userId),
+      this.calculateHeldClearSettlementKobo(userId),
+    ]);
+    const kycTier = this.resolveKycTier(verification, payoutProfile);
+    const remainingKobo = Math.max(
+      BASIC_KYC_SETTLEMENT_CAP_KOBO - usageKobo,
+      0,
+    );
+    const livenessRequired =
+      kycTier === KycTierDto.BASIC &&
+      (usageKobo >= BASIC_KYC_SETTLEMENT_CAP_KOBO ||
+        (heldClearKobo > 0 && heldClearKobo > remainingKobo));
+
+    return {
+      kycTier,
+      basicKycSettlementCap: BASIC_KYC_SETTLEMENT_CAP_KOBO / 100,
+      basicKycSettlementUsage: usageKobo / 100,
+      basicKycSettlementRemaining: remainingKobo / 100,
+      livenessRequired,
+      livenessRequiredReason: livenessRequired
+        ? 'BASIC_TIER_CAP_REACHED'
+        : null,
+    };
+  }
+
+  private async calculateBasicKycExposureKobo(userId: string) {
+    const aggregate = await this.prisma.transactionReference.aggregate({
+      _sum: { creatorPayable: true },
+      where: {
+        creatorId: userId,
+        status: TransactionStatusType.SUCCESS,
+        settlementStatus: {
+          in: [
+            SettlementStatus.READY,
+            SettlementStatus.PROCESSING,
+            SettlementStatus.SETTLED,
+          ],
+        },
+      },
+    });
+
+    return aggregate._sum.creatorPayable || 0;
+  }
+
+  private async calculateHeldClearSettlementKobo(userId: string) {
+    const aggregate = await this.prisma.transactionReference.aggregate({
+      _sum: { creatorPayable: true },
+      where: {
+        creatorId: userId,
+        status: TransactionStatusType.SUCCESS,
+        riskStatus: RiskStatus.CLEAR,
+        settlementStatus: SettlementStatus.HELD_KYC,
+      },
+    });
+
+    return aggregate._sum.creatorPayable || 0;
+  }
+
+  private hashVerificationInput(
+    scope: string,
+    mode: string,
+    value?: string | null,
+  ) {
+    const normalized = `${scope}:${mode}:${value || ''}`
+      .replace(/\s+/g, '')
+      .toUpperCase();
+    const secret = process.env.KYC_ENTITY_HASH_SECRET || process.env.JWT_SECRET;
+    return secret
+      ? crypto.createHmac('sha256', secret).update(normalized).digest('hex')
+      : crypto.createHash('sha256').update(normalized).digest('hex');
+  }
+
+  private getCachedVerificationAttempt(
+    metadata: Prisma.JsonValue | null | undefined,
+    key: string,
+    inputHash?: string | null,
+  ) {
+    if (!inputHash) {
+      return null;
+    }
+
+    const cache = this.normalizeJsonObject(
+      this.normalizeJsonObject(metadata).verificationCache,
+    );
+    const attempt = this.normalizeJsonObject(cache[key]);
+
+    return attempt.inputHash === inputHash ? attempt : null;
+  }
+
+  private mergeVerificationCache(
+    metadata: Prisma.JsonValue | null | undefined,
+    key: string,
+    attempt: Record<string, any>,
+  ) {
+    const cache = this.normalizeJsonObject(
+      this.normalizeJsonObject(metadata).verificationCache,
+    );
+
+    return {
+      ...cache,
+      [key]: attempt,
+    };
+  }
+
+  private assertIdentityReferenceIsLocallyValid(
+    mode: string,
+    identityReference?: string | null,
+  ) {
+    const normalized = identityReference?.replace(/\s+/g, '').trim();
+
+    if (!normalized) {
+      throw new BadRequestException(
+        'Enter the identity number for the selected verification method',
+      );
+    }
+
+    if (mode.includes('BVN') && !/^\d{11}$/.test(normalized)) {
+      throw new BadRequestException('Enter a valid 11 digit BVN');
+    }
+
+    if (
+      mode.includes('NIN') &&
+      !mode.includes('VNIN') &&
+      !/^\d{11}$/.test(normalized)
+    ) {
+      throw new BadRequestException('Enter a valid 11 digit NIN');
+    }
+
+    if (mode.includes('PHONE') && !/^\+?\d{10,15}$/.test(normalized)) {
+      throw new BadRequestException('Enter a valid phone number');
+    }
+
+    if (mode.includes('PASSPORT') && normalized.length < 5) {
+      throw new BadRequestException('Enter a valid passport number');
+    }
+  }
+
+  private assertBusinessReferenceIsLocallyValid(regNumber?: string | null) {
+    const normalized = regNumber?.replace(/\s+/g, '').trim();
+
+    if (!normalized || !/^[A-Za-z0-9/-]{4,64}$/.test(normalized)) {
+      throw new BadRequestException('Enter a valid CAC registration number');
+    }
+  }
+
   private resolvePaymentType(
     paymentType: PaymentType | null,
     metadata: Record<string, any>,
@@ -2571,6 +4157,8 @@ export class WalletService {
   }
 
   private formatPayoutProfile(profile: any) {
+    const metadata = this.normalizeJsonObject(profile.metadata);
+
     return {
       status: profile.status,
       accountOwnershipType: profile.accountOwnershipType,
@@ -2590,6 +4178,8 @@ export class WalletService {
       rejectionReason: profile.rejectionReason,
       submittedAt: profile.submittedAt,
       approvedAt: profile.approvedAt,
+      accountNameConfirmed: this.isPayoutAccountConfirmed(profile),
+      kycTier: metadata.kycTier || metadata.approvedTier || KycTierDto.NONE,
     };
   }
 
@@ -2624,14 +4214,18 @@ export class WalletService {
         email: user.email,
         createdAt: user.createdAt,
       },
-      payoutProfile: payoutProfile ? this.formatPayoutProfile(payoutProfile) : null,
+      payoutProfile: payoutProfile
+        ? this.formatPayoutProfile(payoutProfile)
+        : null,
       alatProfile: alatProfile
         ? {
             status: alatProfile.status,
             displayName: alatProfile.displayName,
             businessId: alatProfile.businessId,
             subaccountReference: alatProfile.subaccountReference,
-            accountNumberMasked: this.maskAccountNumber(alatProfile.accountNumber),
+            accountNumberMasked: this.maskAccountNumber(
+              alatProfile.accountNumber,
+            ),
             accountName: alatProfile.accountName,
             activatedAt: alatProfile.activatedAt,
             reviewedAt: alatProfile.reviewedAt,
@@ -2641,8 +4235,23 @@ export class WalletService {
     };
   }
 
-  private formatKyc(verification: any) {
-    const steps = this.buildKycSteps(verification);
+  private formatKyc(
+    verification: any,
+    payoutProfile?: any | null,
+    tierSummary?: KycTierSummary,
+  ) {
+    const resolvedTierSummary =
+      tierSummary ||
+      this.buildStaticKycTierSummary(verification, payoutProfile);
+    const steps = this.buildKycSteps(
+      verification,
+      payoutProfile,
+      resolvedTierSummary,
+    );
+    const currentStep =
+      steps.find((step) => step.active)?.code ||
+      steps.find((step) => step.status === 'FAILED')?.code ||
+      null;
 
     return {
       status: verification.status,
@@ -2664,6 +4273,11 @@ export class WalletService {
       verifiedFullName: verification.verifiedFullName || null,
       verifiedBusinessName: verification.verifiedBusinessName || null,
       rejectionReason: verification.rejectionReason || null,
+      nameMatchReason: verification.nameMatchReason || null,
+      currentStep,
+      canSubmitBasicKyc: false,
+      canSubmitFullKyc: false,
+      ...resolvedTierSummary,
     };
   }
 
@@ -2672,7 +4286,7 @@ export class WalletService {
     const formattedPayoutProfile = payoutProfile
       ? this.formatPayoutProfile(payoutProfile)
       : null;
-    const formattedVerification = this.formatKyc(verification);
+    const formattedVerification = this.formatKyc(verification, payoutProfile);
 
     return {
       id: verification.id,
@@ -2791,6 +4405,76 @@ export class WalletService {
   private normalizePayoutAccountNumber(accountNumber?: string | null) {
     const normalized = accountNumber?.replace(/\s+/g, '').trim();
     return normalized || null;
+  }
+
+  private resolveValidPayoutAccountDetails(
+    bankCode?: string | null,
+    accountNumber?: string | null,
+  ) {
+    if (!bankCode) {
+      throw new BadRequestException('Bank code is required');
+    }
+
+    if (!accountNumber) {
+      throw new BadRequestException('Account number is required');
+    }
+
+    if (!/^\d{10}$/.test(accountNumber)) {
+      throw new BadRequestException(
+        'Enter a valid 10 digit payout account number',
+      );
+    }
+
+    return {
+      bankCode,
+      accountNumber,
+    };
+  }
+
+  private async resolvePayoutAccountWithPaystack(
+    bankCode: string,
+    accountNumber: string,
+  ) {
+    const response = await this.paystackService.resolveBankAccount({
+      accountNumber,
+      bankCode,
+    });
+
+    if (!response.status || !response.data?.account_name) {
+      throw new BadRequestException(
+        response.message || 'We could not resolve the submitted payout account',
+      );
+    }
+
+    return {
+      accountNumber: response.data.account_number,
+      accountName: response.data.account_name,
+    };
+  }
+
+  private buildPayoutAccountConfirmation(input: {
+    accountName?: string | null;
+    bankCode?: string | null;
+    accountNumber?: string | null;
+  }) {
+    return {
+      confirmedAt: new Date().toISOString(),
+      accountName: input.accountName,
+      bankCode: input.bankCode,
+      accountNumberHash: this.hashKycSubject(input.accountNumber),
+    };
+  }
+
+  private summarizePaystackAccountResolution(input: {
+    accountNumber: string;
+    accountName: string;
+  }) {
+    return {
+      provider: 'PAYSTACK',
+      accountNumberHash: this.hashKycSubject(input.accountNumber),
+      accountName: input.accountName,
+      resolvedAt: new Date().toISOString(),
+    };
   }
 
   private async assertNoDuplicatePayoutAccount(
@@ -2916,9 +4600,16 @@ export class WalletService {
       : crypto.createHash('sha256').update(normalized).digest('hex');
   }
 
-  private extractProviderSubject(response?: QoreIdNinResponse | null) {
+  private extractProviderSubject(response?: DikriptNinResponse | null) {
     const identityRecord = this.extractIdentityRecord(response);
-    return identityRecord?.phone || null;
+    return (
+      identityRecord?.bvn ||
+      identityRecord?.nin ||
+      identityRecord?.phoneNumber ||
+      identityRecord?.phone ||
+      identityRecord?.passportNo ||
+      null
+    );
   }
 
   private hashNameDob(fullName?: string | null, dateOfBirth?: Date | null) {
@@ -3010,7 +4701,7 @@ export class WalletService {
           ? 'Potential duplicate business entity detected. Final approval requires manual review.'
           : matchedSignals.includes('NAME_DOB_FALLBACK')
             ? 'Potential duplicate identity detected from verified name and date of birth. Final approval requires manual review.'
-          : 'Potential duplicate identity detected. Final approval requires manual review.'
+            : 'Potential duplicate identity detected. Final approval requires manual review.'
         : null,
       metadata: {
         status: hasDuplicate ? 'REVIEW_REQUIRED' : 'CLEAR',
@@ -3026,7 +4717,11 @@ export class WalletService {
     kycStatus: KycVerificationStatus,
     alatStatus: CreatorAlatProfileStatus,
     hasBusinessId: boolean,
+    livenessRequired: boolean,
+    kycTier: KycTier,
   ) {
+    const basicTierApproved =
+      kycTier === KycTierDto.BASIC || kycTier === KycTierDto.FULL;
     const payoutTaskStatus =
       payoutStatus === CreatorSettlementProfileStatus.NOT_STARTED
         ? 'PENDING'
@@ -3034,11 +4729,17 @@ export class WalletService {
     const kycTaskStatus =
       payoutStatus === CreatorSettlementProfileStatus.NOT_STARTED
         ? 'LOCKED'
-        : kycStatus === KycVerificationStatus.VERIFIED
+        : kycStatus === KycVerificationStatus.VERIFIED || basicTierApproved
           ? 'COMPLETED'
           : 'PENDING';
+    const livenessTaskStatus = !basicTierApproved
+      ? 'LOCKED'
+      : livenessRequired
+        ? 'PENDING'
+        : 'COMPLETED';
     const alatTaskStatus =
-      payoutStatus !== CreatorSettlementProfileStatus.ACTIVE
+      payoutStatus !== CreatorSettlementProfileStatus.ACTIVE ||
+      kycTier !== KycTierDto.FULL
         ? 'LOCKED'
         : alatStatus === CreatorAlatProfileStatus.ACTIVE && hasBusinessId
           ? 'COMPLETED'
@@ -3053,9 +4754,15 @@ export class WalletService {
       },
       {
         code: 'COMPLETE_KYC',
-        title: 'Complete identity verification',
+        title: 'Complete Basic KYC',
         status: kycTaskStatus,
         blocking: true,
+      },
+      {
+        code: 'COMPLETE_LIVENESS',
+        title: 'Complete face verification',
+        status: livenessTaskStatus,
+        blocking: livenessRequired,
       },
       {
         code: 'ALAT_ACTIVATION',
@@ -3122,7 +4829,11 @@ export class WalletService {
     } satisfies Prisma.CreatorKycVerificationWhereInput;
   }
 
-  private buildKycSteps(verification: any) {
+  private buildKycSteps(
+    verification: any,
+    payoutProfile?: any | null,
+    tierSummary?: KycTierSummary,
+  ) {
     const accountOwnershipType =
       verification.accountOwnershipType || AccountOwnershipType.UNKNOWN;
     const businessStatus =
@@ -3131,86 +4842,163 @@ export class WalletService {
       verification.identityStatus || KycVerificationStatus.NOT_STARTED;
     const livenessStatus =
       verification.livenessStatus || KycVerificationStatus.NOT_STARTED;
-    const amlStatus =
-      verification.amlStatus || KycVerificationStatus.NOT_STARTED;
     const nameMatchStatus =
       verification.nameMatchStatus || NameMatchStatus.NOT_CHECKED;
+    const profileStatus =
+      payoutProfile?.status || CreatorSettlementProfileStatus.NOT_STARTED;
+    const hasVerifiedPayoutAccount =
+      this.hasVerifiedPayoutAccount(payoutProfile);
+    const approvedTier =
+      tierSummary?.kycTier || this.resolveKycTier(verification, payoutProfile);
+    const basicApproved =
+      profileStatus === CreatorSettlementProfileStatus.ACTIVE &&
+      (approvedTier === KycTierDto.BASIC || approvedTier === KycTierDto.FULL);
+    const fullApproved = approvedTier === KycTierDto.FULL;
+
+    const createStep = (
+      code: string,
+      title: string,
+      status: string,
+      active = false,
+      requiresPaidProvider = false,
+    ) => ({
+      code,
+      title,
+      status,
+      active,
+      requiresPaidProvider,
+    });
+
+    const payoutStatus = hasVerifiedPayoutAccount ? 'COMPLETED' : 'ACTIVE';
+    const nameMatchStepStatus =
+      nameMatchStatus === NameMatchStatus.MATCHED
+        ? 'COMPLETED'
+        : nameMatchStatus === NameMatchStatus.REVIEW_REQUIRED
+          ? 'REVIEW'
+          : nameMatchStatus === NameMatchStatus.MISMATCH
+            ? 'FAILED'
+            : 'PENDING';
+    const livenessStepStatus = fullApproved
+      ? 'COMPLETED'
+      : livenessStatus === KycVerificationStatus.PENDING_PROVIDER
+        ? 'PENDING'
+        : livenessStatus === KycVerificationStatus.REJECTED
+          ? 'FAILED'
+          : livenessStatus === KycVerificationStatus.VERIFIED
+            ? 'COMPLETED'
+            : 'ACTIVE';
 
     if (accountOwnershipType === AccountOwnershipType.BUSINESS) {
+      const businessStepStatus = this.mapKycStatusToStep(businessStatus);
+      const representativeStepStatus = this.mapKycStatusToStep(identityStatus);
+      const representativeAllowsFull =
+        identityStatus === KycVerificationStatus.VERIFIED ||
+        identityStatus === KycVerificationStatus.SUBMITTED;
+      const businessNameMatchUnlocked =
+        businessStatus === KycVerificationStatus.VERIFIED;
+      const basicBusinessReady =
+        businessNameMatchUnlocked &&
+        nameMatchStatus === NameMatchStatus.MATCHED;
+      const representativeAvailable =
+        fullApproved || (basicApproved && basicBusinessReady);
+      const representativeActive =
+        representativeAvailable &&
+        !fullApproved &&
+        identityStatus !== KycVerificationStatus.VERIFIED &&
+        identityStatus !== KycVerificationStatus.SUBMITTED &&
+        identityStatus !== KycVerificationStatus.PENDING_PROVIDER;
+      const livenessAvailable =
+        fullApproved || (representativeAvailable && representativeAllowsFull);
+      const livenessActive =
+        !fullApproved &&
+        livenessAvailable &&
+        livenessStatus !== KycVerificationStatus.PENDING_PROVIDER &&
+        livenessStatus !== KycVerificationStatus.VERIFIED;
+
       return [
-        {
-          code: 'BUSINESS_IDENTITY',
-          status: this.mapKycStatusToStep(businessStatus),
-        },
-        {
-          code: 'REPRESENTATIVE_IDENTITY',
-          status:
-            businessStatus !== KycVerificationStatus.VERIFIED
-              ? 'LOCKED'
-              : this.mapKycStatusToStep(identityStatus),
-        },
-        {
-          code: 'LIVENESS',
-          status:
-            identityStatus !== KycVerificationStatus.VERIFIED
-              ? 'LOCKED'
-              : this.mapKycStatusToStep(livenessStatus),
-        },
-        {
-          code: 'AML',
-          status:
-            livenessStatus === KycVerificationStatus.NOT_STARTED
-              ? 'LOCKED'
-              : this.mapKycStatusToStep(amlStatus),
-        },
-        {
-          code: 'NAME_MATCH',
-          status:
-            amlStatus === KycVerificationStatus.NOT_STARTED
-              ? 'LOCKED'
-              : nameMatchStatus === NameMatchStatus.MATCHED
-                ? 'COMPLETED'
-                : nameMatchStatus === NameMatchStatus.REVIEW_REQUIRED
-                  ? 'REVIEW'
-                  : nameMatchStatus === NameMatchStatus.MISMATCH
-                    ? 'FAILED'
-                    : 'PENDING',
-        },
+        createStep(
+          'PAYOUT_ACCOUNT',
+          'Add payout account',
+          payoutStatus,
+          !hasVerifiedPayoutAccount,
+          true,
+        ),
+        createStep(
+          'BUSINESS_IDENTITY',
+          'Verify CAC record',
+          !hasVerifiedPayoutAccount ? 'LOCKED' : businessStepStatus,
+          hasVerifiedPayoutAccount &&
+            businessStatus !== KycVerificationStatus.VERIFIED &&
+            businessStatus !== KycVerificationStatus.PENDING_PROVIDER,
+          true,
+        ),
+        createStep(
+          'BUSINESS_NAME_MATCH',
+          'Match business name',
+          businessNameMatchUnlocked ? nameMatchStepStatus : 'LOCKED',
+          businessNameMatchUnlocked &&
+            nameMatchStatus === NameMatchStatus.MISMATCH,
+          false,
+        ),
+        createStep(
+          'REPRESENTATIVE_IDENTITY',
+          'Verify representative',
+          !representativeAvailable ? 'LOCKED' : representativeStepStatus,
+          representativeActive,
+          true,
+        ),
+        createStep(
+          'LIVENESS',
+          tierSummary?.livenessRequired
+            ? 'Complete face verification'
+            : 'Upgrade with face verification',
+          livenessAvailable ? livenessStepStatus : 'LOCKED',
+          livenessActive,
+          true,
+        ),
       ];
     }
 
+    const identityStepStatus = this.mapKycStatusToStep(identityStatus);
+    const identityUnlocked = hasVerifiedPayoutAccount;
+    const nameMatchUnlocked = identityStatus === KycVerificationStatus.VERIFIED;
+    const livenessUnlocked = basicApproved && !fullApproved;
+
     return [
-      {
-        code: 'IDENTITY',
-        status: this.mapKycStatusToStep(identityStatus),
-      },
-      {
-        code: 'LIVENESS',
-        status:
-          identityStatus !== KycVerificationStatus.VERIFIED
-            ? 'LOCKED'
-            : this.mapKycStatusToStep(livenessStatus),
-      },
-      {
-        code: 'AML',
-        status:
-          livenessStatus === KycVerificationStatus.NOT_STARTED
-            ? 'LOCKED'
-            : this.mapKycStatusToStep(amlStatus),
-      },
-      {
-        code: 'NAME_MATCH',
-        status:
-          amlStatus === KycVerificationStatus.NOT_STARTED
-            ? 'LOCKED'
-            : nameMatchStatus === NameMatchStatus.MATCHED
-              ? 'COMPLETED'
-              : nameMatchStatus === NameMatchStatus.REVIEW_REQUIRED
-                ? 'REVIEW'
-                : nameMatchStatus === NameMatchStatus.MISMATCH
-                  ? 'FAILED'
-                  : 'PENDING',
-      },
+      createStep(
+        'PAYOUT_ACCOUNT',
+        'Add payout account',
+        payoutStatus,
+        !hasVerifiedPayoutAccount,
+        true,
+      ),
+      createStep(
+        'PERSONAL_IDENTITY',
+        'Verify identity',
+        !identityUnlocked ? 'LOCKED' : identityStepStatus,
+        identityUnlocked &&
+          identityStatus !== KycVerificationStatus.VERIFIED &&
+          identityStatus !== KycVerificationStatus.PENDING_PROVIDER,
+        true,
+      ),
+      createStep(
+        'NAME_MATCH',
+        'Match account name',
+        nameMatchUnlocked ? nameMatchStepStatus : 'LOCKED',
+        nameMatchUnlocked && nameMatchStatus === NameMatchStatus.MISMATCH,
+        false,
+      ),
+      createStep(
+        'LIVENESS',
+        tierSummary?.livenessRequired
+          ? 'Complete face verification'
+          : 'Upgrade with face verification',
+        livenessUnlocked ? livenessStepStatus : 'LOCKED',
+        livenessUnlocked &&
+          livenessStatus !== KycVerificationStatus.PENDING_PROVIDER &&
+          livenessStatus !== KycVerificationStatus.VERIFIED,
+        true,
+      ),
     ];
   }
 
@@ -3228,70 +5016,6 @@ export class WalletService {
       default:
         return 'PENDING';
     }
-  }
-
-  private async verifyPayoutAccount(
-    ownershipType: AccountOwnershipType,
-    dto: UpsertPayoutProfileDto,
-    phoneNumber?: string | null,
-  ) {
-    const referenceName =
-      ownershipType === AccountOwnershipType.BUSINESS
-        ? dto.businessName || dto.accountName
-        : dto.legalName || dto.accountName;
-
-    if (!referenceName) {
-      throw new BadRequestException(
-        ownershipType === AccountOwnershipType.BUSINESS
-          ? 'Business name is required to verify a business payout account'
-          : 'Legal name is required to verify a personal payout account',
-      );
-    }
-
-    const names = this.resolveAccountVerificationNames(
-      referenceName,
-      ownershipType === AccountOwnershipType.PERSONAL,
-    );
-
-    if (!names || !dto.bankCode) {
-      throw new BadRequestException(
-        ownershipType === AccountOwnershipType.BUSINESS
-          ? 'Business name and bank code are required to verify a business payout account'
-          : 'Legal name and bank code are required to verify a personal payout account',
-      );
-    }
-
-    const response = await this.qoreIdService.verifyNuban({
-      firstName: names.firstName,
-      lastName: names.lastName,
-      accountNumber: dto.accountNumber,
-      bankCode: dto.bankCode,
-      phone: phoneNumber || null,
-    });
-
-    const verificationState = this.resolveQoreIdVerificationState(
-      response.status?.status,
-    );
-    const matchStatus = (
-      response.summary?.nuban_check?.status || ''
-    ).toUpperCase();
-
-    if (verificationState === 'failed' || !response.nuban?.accountName) {
-      throw new BadRequestException(
-        'We could not verify the submitted payout account',
-      );
-    }
-
-    if (
-      ownershipType === AccountOwnershipType.PERSONAL &&
-      matchStatus === 'NO_MATCH'
-    ) {
-      throw new BadRequestException(
-        'We could not verify the submitted payout account',
-      );
-    }
-
-    return response;
   }
 
   private resolveIdentityNames(
@@ -3314,37 +5038,6 @@ export class WalletService {
 
     if (tokens.length < 2) {
       return null;
-    }
-
-    return {
-      firstName: tokens[0],
-      lastName: tokens.slice(1).join(' '),
-    };
-  }
-
-  private resolveAccountVerificationNames(
-    fallbackFullName?: string | null,
-    requireDistinctParts = true,
-  ) {
-    if (!fallbackFullName) {
-      return null;
-    }
-
-    const tokens = fallbackFullName.trim().split(/\s+/).filter(Boolean);
-
-    if (tokens.length === 0) {
-      return null;
-    }
-
-    if (tokens.length === 1) {
-      if (requireDistinctParts) {
-        return null;
-      }
-
-      return {
-        firstName: tokens[0],
-        lastName: tokens[0],
-      };
     }
 
     return {
@@ -3381,6 +5074,14 @@ export class WalletService {
       return dto.verificationMode;
     }
 
+    if (dto.bvn) {
+      return 'PERSONAL_BVN';
+    }
+
+    if (dto.phoneNumber) {
+      return 'PERSONAL_PHONE';
+    }
+
     if (dto.passportNumber) {
       return 'PERSONAL_PASSPORT';
     }
@@ -3393,7 +5094,7 @@ export class WalletService {
       return 'PERSONAL_NIN';
     }
 
-    return 'PERSONAL_PHONE_NIN';
+    return 'PERSONAL_PHONE';
   }
 
   private resolveBusinessVerificationMode(
@@ -3409,6 +5110,14 @@ export class WalletService {
       return dto.verificationMode;
     }
 
+    if (dto.representativeBvn) {
+      return 'BUSINESS_CAC_REP_BVN';
+    }
+
+    if (dto.representativePhoneNumber) {
+      return 'BUSINESS_CAC_REP_PHONE';
+    }
+
     if (dto.representativePassportNumber) {
       return 'BUSINESS_CAC_REP_PASSPORT';
     }
@@ -3421,7 +5130,7 @@ export class WalletService {
       return 'BUSINESS_CAC_REP_NIN';
     }
 
-    return 'BUSINESS_CAC_REP_PHONE_NIN';
+    return 'BUSINESS_CAC_REP_PHONE';
   }
 
   private resolveIdentityTypeFromMode(mode: string) {
@@ -3429,27 +5138,19 @@ export class WalletService {
       return 'PASSPORT';
     }
 
+    if (mode.includes('BVN')) {
+      return 'BVN';
+    }
+
     if (mode.includes('VNIN')) {
       return 'VNIN';
     }
 
-    if (mode.includes('PHONE_NIN')) {
-      return 'PHONE_NIN';
+    if (mode.includes('PHONE')) {
+      return 'PHONE';
     }
 
     return 'NIN';
-  }
-
-  private resolveFaceVerificationIdType(mode: string) {
-    if (mode.includes('PASSPORT')) {
-      return 'nigerian_passport' as const;
-    }
-
-    if (mode.includes('VNIN')) {
-      return 'vnin' as const;
-    }
-
-    return 'nin' as const;
   }
 
   private resolveIdentityReferenceFromMode(
@@ -3466,6 +5167,11 @@ export class WalletService {
         return 'vnin' in dto ? dto.vnin || null : null;
       case 'PERSONAL_NIN':
         return 'nin' in dto ? dto.nin || null : null;
+      case 'PERSONAL_BVN':
+        return 'bvn' in dto ? dto.bvn || null : null;
+      case 'PERSONAL_PHONE':
+      case 'PERSONAL_PHONE_NIN':
+        return 'phoneNumber' in dto ? dto.phoneNumber || null : null;
       case 'BUSINESS_CAC_REP_PASSPORT':
         return 'representativePassportNumber' in dto
           ? dto.representativePassportNumber || null
@@ -3478,12 +5184,21 @@ export class WalletService {
         return 'representativeNin' in dto
           ? dto.representativeNin || null
           : null;
+      case 'BUSINESS_CAC_REP_BVN':
+        return 'representativeBvn' in dto
+          ? dto.representativeBvn || null
+          : null;
+      case 'BUSINESS_CAC_REP_PHONE':
+      case 'BUSINESS_CAC_REP_PHONE_NIN':
+        return 'representativePhoneNumber' in dto
+          ? dto.representativePhoneNumber || null
+          : null;
       default:
         return null;
     }
   }
 
-  private async verifyPersonalIdentityWithQoreId(input: {
+  private async verifyPersonalIdentityWithDikript(input: {
     verificationMode: string;
     dto: StartPersonalKycDto;
     resolvedNames: { firstName: string; lastName: string };
@@ -3510,7 +5225,7 @@ export class WalletService {
             'NIN is required for this verification mode',
           );
         }
-        return this.qoreIdService.verifyNin({
+        return this.dikriptService.verifyNin({
           nin: input.dto.nin,
           ...commonInput,
         });
@@ -3520,8 +5235,18 @@ export class WalletService {
             'vNIN is required for this verification mode',
           );
         }
-        return this.qoreIdService.verifyVirtualNin({
+        return this.dikriptService.verifyVirtualNin({
           vnin: input.dto.vnin,
+          ...commonInput,
+        });
+      case 'PERSONAL_BVN':
+        if (!input.dto.bvn) {
+          throw new BadRequestException(
+            'BVN is required for this verification mode',
+          );
+        }
+        return this.dikriptService.verifyBvn({
+          bvn: input.dto.bvn,
           ...commonInput,
         });
       case 'PERSONAL_PASSPORT':
@@ -3530,25 +5255,35 @@ export class WalletService {
             'Passport number is required for this verification mode',
           );
         }
-        return this.qoreIdService.verifyPassport({
+        return this.dikriptService.verifyPassport({
           passportNumber: input.dto.passportNumber,
           ...commonInput,
         });
       case 'PERSONAL_PHONE_NIN':
+        if (!(input.dto.phoneNumber || input.user?.phoneNumber)) {
+          throw new BadRequestException(
+            'Phone number is required for this verification mode',
+          );
+        }
+        return this.dikriptService.verifyNinByPhone({
+          phoneNumber: input.dto.phoneNumber || input.user?.phoneNumber || '',
+          ...commonInput,
+        });
+      case 'PERSONAL_PHONE':
       default:
         if (!(input.dto.phoneNumber || input.user?.phoneNumber)) {
           throw new BadRequestException(
             'Phone number is required for this verification mode',
           );
         }
-        return this.qoreIdService.verifyNinByPhone({
+        return this.dikriptService.verifyPhone({
           phoneNumber: input.dto.phoneNumber || input.user?.phoneNumber || '',
           ...commonInput,
         });
     }
   }
 
-  private async verifyBusinessRepresentativeWithQoreId(input: {
+  private async verifyBusinessRepresentativeWithDikript(input: {
     verificationMode: string;
     dto: StartBusinessRepresentativeKycDto;
     representativeNames: { firstName: string; lastName: string };
@@ -3576,7 +5311,7 @@ export class WalletService {
             'Representative NIN is required for this verification mode',
           );
         }
-        return this.qoreIdService.verifyNin({
+        return this.dikriptService.verifyNin({
           nin: input.dto.representativeNin,
           ...commonInput,
         });
@@ -3586,8 +5321,18 @@ export class WalletService {
             'Representative vNIN is required for this verification mode',
           );
         }
-        return this.qoreIdService.verifyVirtualNin({
+        return this.dikriptService.verifyVirtualNin({
           vnin: input.dto.representativeVnin,
+          ...commonInput,
+        });
+      case 'BUSINESS_CAC_REP_BVN':
+        if (!input.dto.representativeBvn) {
+          throw new BadRequestException(
+            'Representative BVN is required for this verification mode',
+          );
+        }
+        return this.dikriptService.verifyBvn({
+          bvn: input.dto.representativeBvn,
           ...commonInput,
         });
       case 'BUSINESS_CAC_REP_PASSPORT':
@@ -3596,18 +5341,31 @@ export class WalletService {
             'Representative passport number is required for this verification mode',
           );
         }
-        return this.qoreIdService.verifyPassport({
+        return this.dikriptService.verifyPassport({
           passportNumber: input.dto.representativePassportNumber,
           ...commonInput,
         });
       case 'BUSINESS_CAC_REP_PHONE_NIN':
+        if (!(input.dto.representativePhoneNumber || input.user?.phoneNumber)) {
+          throw new BadRequestException(
+            'Representative phone number is required for this verification mode',
+          );
+        }
+        return this.dikriptService.verifyNinByPhone({
+          phoneNumber:
+            input.dto.representativePhoneNumber ||
+            input.user?.phoneNumber ||
+            '',
+          ...commonInput,
+        });
+      case 'BUSINESS_CAC_REP_PHONE':
       default:
         if (!(input.dto.representativePhoneNumber || input.user?.phoneNumber)) {
           throw new BadRequestException(
             'Representative phone number is required for this verification mode',
           );
         }
-        return this.qoreIdService.verifyNinByPhone({
+        return this.dikriptService.verifyPhone({
           phoneNumber:
             input.dto.representativePhoneNumber ||
             input.user?.phoneNumber ||
@@ -3617,15 +5375,22 @@ export class WalletService {
     }
   }
 
-  private extractIdentityRecord(response?: QoreIdNinResponse | null) {
+  private extractIdentityRecord(response?: DikriptNinResponse | null) {
     if (!response) {
       return null;
     }
 
-    return response.nin || response.virtual_nin || response.passport || null;
+    return (
+      response.nin ||
+      response.bvn ||
+      response.phone ||
+      response.virtual_nin ||
+      response.passport ||
+      null
+    );
   }
 
-  private extractQoreIdIdentityMatchStatus(response: QoreIdNinResponse) {
+  private extractDikriptIdentityMatchStatus(response: DikriptNinResponse) {
     const summary = response.summary || {};
     const summaryValue = Object.values(summary).find((value) => Boolean(value));
 
@@ -3640,11 +5405,11 @@ export class WalletService {
     return (summaryValue.status || '').toUpperCase();
   }
 
-  private resolveQoreIdIdentityStatus(response: QoreIdNinResponse) {
-    const verificationState = this.resolveQoreIdVerificationState(
+  private resolveDikriptIdentityStatus(response: DikriptNinResponse) {
+    const verificationState = this.resolveDikriptVerificationState(
       response.status?.status,
     );
-    const matchStatus = this.extractQoreIdIdentityMatchStatus(response);
+    const matchStatus = this.extractDikriptIdentityMatchStatus(response);
     const identityRecord = this.extractIdentityRecord(response);
 
     if (verificationState === 'pending') {
@@ -3663,8 +5428,8 @@ export class WalletService {
     return KycVerificationStatus.VERIFIED;
   }
 
-  private resolveQoreIdBusinessStatus(response: QoreIdCacResponse) {
-    const verificationState = this.resolveQoreIdVerificationState(
+  private resolveDikriptBusinessStatus(response: DikriptCacResponse) {
+    const verificationState = this.resolveDikriptVerificationState(
       response.status?.status,
     );
     const cacSummary = (response.summary?.cac_check || '').toLowerCase();
@@ -3684,10 +5449,10 @@ export class WalletService {
     return KycVerificationStatus.VERIFIED;
   }
 
-  private resolveQoreIdFaceVerificationStatus(
-    response: QoreIdFaceVerificationResponse,
+  private resolveDikriptFaceVerificationStatus(
+    response: DikriptFaceVerificationResponse,
   ) {
-    const verificationState = this.resolveQoreIdVerificationState(
+    const verificationState = this.resolveDikriptVerificationState(
       response.status?.status,
     );
 
@@ -3732,6 +5497,14 @@ export class WalletService {
       return KycVerificationStatus.PENDING_PROVIDER;
     }
 
+    if (
+      relevantStatuses.some(
+        (status) => status === KycVerificationStatus.SUBMITTED,
+      )
+    ) {
+      return KycVerificationStatus.SUBMITTED;
+    }
+
     return KycVerificationStatus.IN_PROGRESS;
   }
 
@@ -3740,6 +5513,14 @@ export class WalletService {
     accountOwnershipType: AccountOwnershipType,
     livenessStatus?: KycVerificationStatus | null,
   ) {
+    if (verificationStatus === KycVerificationStatus.VERIFIED) {
+      return {
+        kycStatus: KycVerificationStatus.VERIFIED,
+        profileStatus: CreatorSettlementProfileStatus.ACTIVE,
+        rejectionReason: null,
+      };
+    }
+
     if (verificationStatus === KycVerificationStatus.REJECTED) {
       return {
         kycStatus: KycVerificationStatus.REJECTED,
@@ -3773,7 +5554,57 @@ export class WalletService {
     };
   }
 
-  private resolveQoreIdVerificationState(status?: string | null) {
+  private canAutoApproveKycTier(input: {
+    targetTier: KycTierDto.BASIC | KycTierDto.FULL;
+    accountOwnershipType: AccountOwnershipType;
+    businessStatus?: KycVerificationStatus | null;
+    identityStatus?: KycVerificationStatus | null;
+    livenessStatus?: KycVerificationStatus | null;
+    nameMatchStatus?: NameMatchStatus | null;
+    dedupStatus?: KycVerificationStatus | null;
+  }) {
+    const requiredStatuses =
+      input.targetTier === KycTierDto.FULL
+        ? input.accountOwnershipType === AccountOwnershipType.BUSINESS
+          ? [input.businessStatus, input.identityStatus, input.livenessStatus]
+          : [input.identityStatus, input.livenessStatus]
+        : input.accountOwnershipType === AccountOwnershipType.BUSINESS
+          ? [input.businessStatus]
+          : [input.identityStatus];
+
+    return (
+      requiredStatuses.every(
+        (status) => status === KycVerificationStatus.VERIFIED,
+      ) &&
+      input.nameMatchStatus === NameMatchStatus.MATCHED &&
+      input.dedupStatus !== KycVerificationStatus.SUBMITTED &&
+      input.dedupStatus !== KycVerificationStatus.REJECTED
+    );
+  }
+
+  private getKycManualReviewReason(input: {
+    nameMatchStatus?: NameMatchStatus | null;
+    nameMatchReason?: string | null;
+    duplicateReason?: string | null;
+    mismatchReason: string;
+    reviewReason: string;
+  }) {
+    if (input.duplicateReason) {
+      return input.duplicateReason;
+    }
+
+    if (input.nameMatchStatus === NameMatchStatus.MISMATCH) {
+      return input.mismatchReason;
+    }
+
+    if (input.nameMatchStatus === NameMatchStatus.REVIEW_REQUIRED) {
+      return input.nameMatchReason || input.reviewReason;
+    }
+
+    return null;
+  }
+
+  private resolveDikriptVerificationState(status?: string | null) {
     const normalized = (status || '').toLowerCase();
 
     if (normalized === 'verified' || normalized === 'complete') {
@@ -3803,25 +5634,8 @@ export class WalletService {
     return 'failed';
   }
 
-  private summarizeQoreNubanResponse(
-    response: QoreIdNubanResponse,
-    ownershipType: AccountOwnershipType,
-  ) {
-    return {
-      accountCheckId: String(response.id),
-      accountVerificationMode:
-        ownershipType === AccountOwnershipType.BUSINESS
-          ? 'BUSINESS_NUBAN'
-          : 'PERSONAL_NUBAN',
-      providerStatus: response.status?.status || null,
-      nubanCheckStatus: response.summary?.nuban_check?.status || null,
-      accountName: response.nuban?.accountName || null,
-      accountCurrency: response.nuban?.accountCurrency || null,
-    };
-  }
-
-  private summarizeQoreNinResponse(
-    response: QoreIdNinResponse,
+  private summarizeDikriptIdentityResponse(
+    response: DikriptNinResponse,
     input: {
       verificationMode: string;
       identityType: string;
@@ -3830,11 +5644,12 @@ export class WalletService {
     const identityRecord = this.extractIdentityRecord(response);
 
     return {
+      provider: 'DIKRIPT',
       requestId: String(response.id),
       verificationMode: input.verificationMode,
       identityType: input.identityType,
       providerStatus: response.status?.status || null,
-      matchStatus: this.extractQoreIdIdentityMatchStatus(response) || null,
+      matchStatus: this.extractDikriptIdentityMatchStatus(response) || null,
       verifiedName: this.combineNameParts(
         identityRecord?.firstname,
         identityRecord?.middlename,
@@ -3850,8 +5665,9 @@ export class WalletService {
     };
   }
 
-  private summarizeQoreBusinessResponse(response: QoreIdCacResponse) {
+  private summarizeDikriptBusinessResponse(response: DikriptCacResponse) {
     return {
+      provider: 'DIKRIPT',
       requestId: String(response.id),
       providerStatus: response.status?.status || null,
       cacCheckStatus: response.summary?.cac_check || null,
@@ -3861,13 +5677,15 @@ export class WalletService {
         response.cac?.rcNumber || null,
       ),
       registrationDate: response.cac?.registrationDate || null,
+      affiliateCount: response.cac?.affiliatesData?.length || 0,
     };
   }
 
-  private summarizeQoreFaceVerificationResponse(
-    response: QoreIdFaceVerificationResponse,
+  private summarizeDikriptFaceVerificationResponse(
+    response: DikriptFaceVerificationResponse,
   ) {
     return {
+      provider: 'DIKRIPT',
       requestId: String(response.id),
       providerStatus: response.status?.status || null,
       match: response.summary?.face_verification_check?.match ?? null,
@@ -3879,7 +5697,7 @@ export class WalletService {
     };
   }
 
-  private summarizeQoreWebhookPayload(payload: any) {
+  private summarizeDikriptWebhookPayload(payload: any) {
     return {
       event: payload?.event || null,
       eventType: payload?.event_type || null,
@@ -3959,6 +5777,154 @@ export class WalletService {
       score,
       reason: 'Settlement account name does not match verified identity',
     };
+  }
+
+  private evaluateBusinessRepresentativeDirectorMatch(input: {
+    representativeName?: string | null;
+    businessResponse: DikriptCacResponse;
+  }) {
+    if (!input.representativeName) {
+      return {
+        status: NameMatchStatus.NOT_CHECKED,
+        score: 0,
+        reason: 'Missing verified representative name',
+        matchedName: null,
+        matchedRole: null,
+      };
+    }
+
+    const representativeTokens = this.normalizeNameTokens(
+      input.representativeName,
+    );
+
+    if (representativeTokens.length === 0) {
+      return {
+        status: NameMatchStatus.NOT_CHECKED,
+        score: 0,
+        reason: 'Representative name could not be normalized',
+        matchedName: null,
+        matchedRole: null,
+      };
+    }
+
+    const affiliates =
+      input.businessResponse.cac?.affiliatesData
+        ?.map((affiliate) => {
+          const role = affiliate.affiliateType?.name || null;
+          const name = this.combineNameParts(
+            affiliate.firstname,
+            affiliate.othername,
+            affiliate.surname,
+          );
+
+          return {
+            name,
+            role,
+            status: affiliate.status || null,
+          };
+        })
+        .filter((affiliate) => {
+          if (!affiliate.name) {
+            return false;
+          }
+
+          const normalizedRole = (affiliate.role || '').toUpperCase();
+
+          return (
+            affiliate.status !== 'INACTIVE' &&
+            normalizedRole !== 'PRESENTER' &&
+            normalizedRole !== 'SECRETARY_COMPANY'
+          );
+        }) || [];
+
+    if (!affiliates.length) {
+      return {
+        status: NameMatchStatus.REVIEW_REQUIRED,
+        score: 0,
+        reason:
+          'CAC advanced check did not return director or controller names for automatic matching',
+        matchedName: null,
+        matchedRole: null,
+      };
+    }
+
+    const bestMatch = affiliates
+      .map((affiliate) => {
+        const affiliateTokens = this.normalizeNameTokens(affiliate.name || '');
+        const sharedTokens = representativeTokens.filter((token) =>
+          affiliateTokens.includes(token),
+        );
+        const uniqueTokenCount = new Set([
+          ...representativeTokens,
+          ...affiliateTokens,
+        ]).size;
+        const score =
+          uniqueTokenCount > 0 ? sharedTokens.length / uniqueTokenCount : 0;
+        const firstLastMatch =
+          representativeTokens[0] === affiliateTokens[0] &&
+          representativeTokens[representativeTokens.length - 1] ===
+            affiliateTokens[affiliateTokens.length - 1];
+        const transposedMatch =
+          representativeTokens[0] ===
+            affiliateTokens[affiliateTokens.length - 1] &&
+          representativeTokens[representativeTokens.length - 1] ===
+            affiliateTokens[0];
+
+        return {
+          ...affiliate,
+          score,
+          strongMatch: firstLastMatch || transposedMatch || score >= 0.75,
+        };
+      })
+      .sort((a, b) => b.score - a.score)[0];
+
+    if (bestMatch?.strongMatch) {
+      return {
+        status: NameMatchStatus.MATCHED,
+        score: bestMatch.score,
+        reason: 'Representative matched CAC director or controller details',
+        matchedName: bestMatch.name,
+        matchedRole: bestMatch.role,
+      };
+    }
+
+    if (bestMatch && bestMatch.score >= 0.45) {
+      return {
+        status: NameMatchStatus.REVIEW_REQUIRED,
+        score: bestMatch.score,
+        reason:
+          'Representative partially matches CAC director or controller details',
+        matchedName: bestMatch.name,
+        matchedRole: bestMatch.role,
+      };
+    }
+
+    return {
+      status: NameMatchStatus.MISMATCH,
+      score: bestMatch?.score || 0,
+      reason:
+        'Representative does not match CAC director or controller details',
+      matchedName: bestMatch?.name || null,
+      matchedRole: bestMatch?.role || null,
+    };
+  }
+
+  private resolveStoredBusinessRegNumber(
+    metadata: Prisma.JsonValue | null | undefined,
+  ) {
+    const businessDraft = this.normalizeJsonObject(
+      this.normalizeJsonObject(metadata).businessDraft,
+    );
+    const regNumber =
+      typeof businessDraft.regNumber === 'string'
+        ? businessDraft.regNumber.trim()
+        : null;
+
+    if (!regNumber || regNumber.includes('*')) {
+      return null;
+    }
+
+    return regNumber;
   }
 
   private normalizeNameTokens(value: string) {

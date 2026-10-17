@@ -42,10 +42,14 @@ export enum KycVerificationStatusDto {
 
 export enum KycVerificationModeDto {
   PERSONAL_NIN = 'PERSONAL_NIN',
+  PERSONAL_BVN = 'PERSONAL_BVN',
+  PERSONAL_PHONE = 'PERSONAL_PHONE',
   PERSONAL_VNIN = 'PERSONAL_VNIN',
   PERSONAL_PASSPORT = 'PERSONAL_PASSPORT',
   PERSONAL_PHONE_NIN = 'PERSONAL_PHONE_NIN',
   BUSINESS_CAC_REP_NIN = 'BUSINESS_CAC_REP_NIN',
+  BUSINESS_CAC_REP_BVN = 'BUSINESS_CAC_REP_BVN',
+  BUSINESS_CAC_REP_PHONE = 'BUSINESS_CAC_REP_PHONE',
   BUSINESS_CAC_REP_VNIN = 'BUSINESS_CAC_REP_VNIN',
   BUSINESS_CAC_REP_PASSPORT = 'BUSINESS_CAC_REP_PASSPORT',
   BUSINESS_CAC_REP_PHONE_NIN = 'BUSINESS_CAC_REP_PHONE_NIN',
@@ -70,6 +74,12 @@ export enum CreatorAlatProfileStatusDto {
   ACTIVE = 'ACTIVE',
   INACTIVE = 'INACTIVE',
   REJECTED = 'REJECTED',
+}
+
+export enum KycTierDto {
+  NONE = 'NONE',
+  BASIC = 'BASIC',
+  FULL = 'FULL',
 }
 
 export enum WalletPaymentProviderDto {
@@ -185,6 +195,12 @@ export class CreatorPayoutProfileDto {
 
   @ApiPropertyOptional({ example: '2026-03-13T10:00:00.000Z' })
   approvedAt?: Date | null;
+
+  @ApiPropertyOptional({ example: true })
+  accountNameConfirmed?: boolean;
+
+  @ApiPropertyOptional({ example: 'BASIC', enum: KycTierDto })
+  kycTier?: KycTierDto;
 }
 
 export class CreatorAlatProfileDto {
@@ -254,6 +270,24 @@ export class WalletOnboardingDto {
 
   @ApiProperty({ enum: CreatorAlatProfileStatusDto })
   alatProfileStatus: CreatorAlatProfileStatusDto;
+
+  @ApiProperty({ enum: KycTierDto })
+  kycTier: KycTierDto;
+
+  @ApiProperty({ example: 5000000 })
+  basicKycSettlementCap: number;
+
+  @ApiProperty({ example: 350000 })
+  basicKycSettlementUsage: number;
+
+  @ApiProperty({ example: 4650000 })
+  basicKycSettlementRemaining: number;
+
+  @ApiProperty({ example: false })
+  livenessRequired: boolean;
+
+  @ApiPropertyOptional({ example: 'BASIC_TIER_CAP_REACHED' })
+  livenessRequiredReason?: string | null;
 }
 
 export class WalletKycStepDto {
@@ -262,6 +296,15 @@ export class WalletKycStepDto {
 
   @ApiProperty({ example: 'PENDING' })
   status: string;
+
+  @ApiPropertyOptional({ example: 'Verify identity' })
+  title?: string;
+
+  @ApiPropertyOptional({ example: true })
+  active?: boolean;
+
+  @ApiPropertyOptional({ example: false })
+  requiresPaidProvider?: boolean;
 }
 
 export class WalletKycDto {
@@ -303,6 +346,36 @@ export class WalletKycDto {
 
   @ApiPropertyOptional({ example: 'Identity details under review' })
   rejectionReason?: string | null;
+
+  @ApiProperty({ enum: KycTierDto })
+  kycTier: KycTierDto;
+
+  @ApiPropertyOptional({ example: 'PERSONAL_IDENTITY' })
+  currentStep?: string | null;
+
+  @ApiProperty({ example: 5000000 })
+  basicKycSettlementCap: number;
+
+  @ApiProperty({ example: 350000 })
+  basicKycSettlementUsage: number;
+
+  @ApiProperty({ example: 4650000 })
+  basicKycSettlementRemaining: number;
+
+  @ApiProperty({ example: false })
+  livenessRequired: boolean;
+
+  @ApiPropertyOptional({ example: 'BASIC_TIER_CAP_REACHED' })
+  livenessRequiredReason?: string | null;
+
+  @ApiProperty({ example: true })
+  canSubmitBasicKyc: boolean;
+
+  @ApiProperty({ example: false })
+  canSubmitFullKyc: boolean;
+
+  @ApiPropertyOptional({ example: 'Payout account name partially matches verified identity' })
+  nameMatchReason?: string | null;
 }
 
 export class SettlementAccountChangeDto {
@@ -449,18 +522,6 @@ export class WalletOverviewDto {
 }
 
 export class UpsertPayoutProfileDto {
-  @ApiPropertyOptional({ example: 'Novusui Events Ltd' })
-  @IsOptional()
-  @IsString()
-  @MaxLength(120)
-  businessName?: string;
-
-  @ApiPropertyOptional({ example: 'Adebola Lateef' })
-  @IsOptional()
-  @IsString()
-  @MaxLength(120)
-  legalName?: string;
-
   @ApiProperty({
     example: 'PERSONAL',
     enum: AccountOwnershipTypeDto,
@@ -483,18 +544,26 @@ export class UpsertPayoutProfileDto {
   @IsString()
   @MaxLength(32)
   accountNumber: string;
+}
 
-  @ApiPropertyOptional({ example: 'Adebola Lateef' })
-  @IsOptional()
+export class ResolvePayoutAccountDto {
+  @ApiProperty({ example: '035' })
   @IsString()
-  @MaxLength(120)
-  accountName?: string;
+  @MaxLength(20)
+  bankCode: string;
 
-  @ApiPropertyOptional({ example: '1234' })
-  @IsOptional()
+  @ApiProperty({ example: '0123456789' })
   @IsString()
-  @MaxLength(4)
-  bvnLast4?: string;
+  @MaxLength(32)
+  accountNumber: string;
+}
+
+export class ResolvedPayoutAccountDto {
+  @ApiProperty({ example: '0123456789' })
+  accountNumber: string;
+
+  @ApiProperty({ example: 'Adebola Lateef' })
+  accountName: string;
 }
 
 export class WalletTransactionsQueryDto {
@@ -674,6 +743,11 @@ export class ReviewKycDto {
   @IsString()
   @MaxLength(500)
   rejectionReason?: string;
+
+  @ApiPropertyOptional({ enum: KycTierDto })
+  @IsOptional()
+  @IsEnum(KycTierDto)
+  approvedTier?: KycTierDto;
 }
 
 export class StartPersonalKycDto {
@@ -687,6 +761,12 @@ export class StartPersonalKycDto {
   @IsString()
   @MaxLength(20)
   phoneNumber?: string;
+
+  @ApiPropertyOptional({ example: '22270444036' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  bvn?: string;
 
   @ApiPropertyOptional({ example: '12345678901' })
   @IsOptional()
@@ -794,6 +874,12 @@ export class StartBusinessRepresentativeKycDto {
   @MaxLength(32)
   representativeNin?: string;
 
+  @ApiPropertyOptional({ example: '22270444036' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  representativeBvn?: string;
+
   @ApiPropertyOptional({ example: '11122233344' })
   @IsOptional()
   @IsString()
@@ -811,6 +897,11 @@ export class SubmitKycDto {
   @ApiProperty({ example: true })
   @IsBoolean()
   confirm: boolean;
+
+  @ApiPropertyOptional({ enum: KycTierDto, default: KycTierDto.BASIC })
+  @IsOptional()
+  @IsEnum(KycTierDto)
+  targetTier?: KycTierDto;
 }
 
 export class NotifyOnKycResolutionDto {

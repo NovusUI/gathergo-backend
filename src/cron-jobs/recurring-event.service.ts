@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 
 @Injectable()
@@ -40,12 +41,39 @@ export class RecurringEventService {
 
       await this.prisma.event.create({
         data: {
-          ...event,
+          title: event.title,
+          description: event.description,
+          impactTitle: event.impactTitle,
+          impactDescription: event.impactDescription,
+          impactPercentage: event.impactPercentage,
+          impactSdgGoals: this.toNullableJsonInput(event.impactSdgGoals),
+          impactPaths: this.toNullableJsonInput(event.impactPaths),
+          impactCommitments: this.toNullableJsonInput(event.impactCommitments),
+          impactMapSource: event.impactMapSource,
+          impactMapGeneratedAt: event.impactMapGeneratedAt,
+          isPhysicalEvent: event.isPhysicalEvent,
+          imageUrl: event.imageUrl,
+          thumbnailUrl: event.thumbnailUrl,
+          isImageProcessing: event.isImageProcessing,
+          location: event.location,
+          links: event.links,
+          tags: event.tags,
+          reoccurring: event.reoccurring,
+          endRepeat: event.endRepeat,
+          communityId: event.communityId,
+          creatorId: event.creatorId,
+          registrationType: event.registrationType,
+          registrationFee: event.registrationFee,
+          registrationAttendees: event.registrationAttendees,
+          donationTarget: event.donationTarget,
           startDate: newStartDate,
           endDate: newEndDate,
-
         },
       });
     }
+  }
+
+  private toNullableJsonInput(value: Prisma.JsonValue) {
+    return value === null ? Prisma.JsonNull : (value as Prisma.InputJsonValue);
   }
 }

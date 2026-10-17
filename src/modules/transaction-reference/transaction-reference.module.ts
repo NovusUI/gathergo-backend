@@ -1,3 +1,5 @@
+import { CheckoutService } from '../checkout/checkout.service';
+import { CheckoutWorker } from '../checkout/checkout.worker';
 import { Module } from '@nestjs/common';
 import { TransactionReferenceService } from './transaction-reference.service';
 import { TransactionReferenceController } from './transaction-reference.controller';
@@ -23,6 +25,8 @@ import { AlatCollectionService } from './alat-collection.service';
   controllers: [TransactionReferenceController],
   providers: [
     TransactionReferenceService,
+    CheckoutService,
+    CheckoutWorker,
     PaystackService,
     AlatCollectionService,
     RegistrationService,

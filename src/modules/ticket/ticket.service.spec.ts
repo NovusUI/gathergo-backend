@@ -72,29 +72,35 @@ describe('TicketService', () => {
   });
 
   it('batches feed generation for multi-ticket purchases', async () => {
-    const result = await service.create(
-      {
-        id: 'txn-1',
+    prisma.ticket.findMany.mockResolvedValue(
+      ['ticket-1', 'ticket-2', 'ticket-3'].map((id) => ({
+        id,
+        qrCode: id,
         userId: 'user-1',
+        eventTicketId: 'event-ticket-1',
         user: {
           email: 'buyer@example.com',
           username: 'buyer',
           fullName: 'Ada Buyer',
         },
-      },
-      [
-        {
-          eventTicketId: 'event-ticket-1',
-          quantity: 3,
-          ticketName: 'VIP',
+        eventTicket: {
+          event: {
+            id: 'event-1',
+            title: 'Launch Party',
+            creatorId: 'creator-1',
+            startDate: new Date('2026-04-01'),
+            location: 'Lagos',
+            thumbnailUrl: '',
+          },
+          type: 'VIP',
         },
-      ],
-      'event-1',
-      'buyer',
+      })),
     );
+    await service.notifyPurchase('txn-1');
 
-    expect(result).toEqual([]);
-    expect(feedIntegrationService.onTicketPurchaseBatch).toHaveBeenCalledTimes(1);
+    expect(feedIntegrationService.onTicketPurchaseBatch).toHaveBeenCalledTimes(
+      1,
+    );
     expect(feedIntegrationService.onTicketPurchaseBatch).toHaveBeenCalledWith(
       'event-1',
       'user-1',

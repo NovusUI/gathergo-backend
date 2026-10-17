@@ -3,10 +3,7 @@ import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import { MailDeliveryService } from './mail-delivery.service';
 import { MailSettingsService } from './mail-settings.service';
-import {
-  MailFeature,
-  MailTemplateVariables,
-} from './mail.types';
+import { MailFeature, MailTemplateVariables } from './mail.types';
 
 @Processor('mailQueue')
 @Injectable()
@@ -42,8 +39,8 @@ export class MailProcessor extends WorkerHost {
       );
       return;
     }
- 
-    console.log("first leg")
+
+    console.log('first leg');
 
     try {
       await this.mailDeliveryService.sendTemplate(feature, {
@@ -102,7 +99,7 @@ export class MailProcessor extends WorkerHost {
           totalAmount:
             typeof data.price === 'number' && typeof data.quantity === 'number'
               ? data.price * data.quantity
-              : data.price ?? 0,
+              : (data.price ?? 0),
           eventImage: data.eventImage || '',
           qrCode: data.qrCode || '',
           qrCodeImageUrl: this.buildQrCodeImageUrl(data.qrCode),
@@ -182,7 +179,7 @@ export class MailProcessor extends WorkerHost {
           impactDescription:
             data.impactDescription ||
             'This campaign gives back directly to a real-world cause.',
-          impactPercentage: data.impactPercentage ?? 100,
+          impactPercentage: data.impactPercentage ?? 0,
           campaignUrl: data.campaignUrl || '#',
           campaignImage: data.campaignImage || '',
         };

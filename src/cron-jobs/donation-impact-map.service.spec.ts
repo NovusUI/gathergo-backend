@@ -34,8 +34,9 @@ describe('DonationImpactMapService', () => {
         donationTarget: 2500000,
         thumbnailUrl: null,
         impactTitle: 'Food Relief',
-        impactDescription: 'Help families access meals and emergency food packs.',
-        impactPercentage: 100,
+        impactDescription:
+          'Help families access meals and emergency food packs.',
+        impactPercentage: null,
         creator: {
           username: 'gathergo',
           fullName: 'GatherGo Team',
@@ -74,7 +75,7 @@ describe('DonationImpactMapService', () => {
         donationTarget: 25000,
         amountRaised: 17500,
         impactTitle: 'Food Relief',
-        impactPercentage: 100,
+        impactPercentage: undefined,
       }),
     );
     expect(prisma.event.update).toHaveBeenCalledWith({
@@ -95,7 +96,7 @@ describe('DonationImpactMapService', () => {
         thumbnailUrl: null,
         impactTitle: 'Education',
         impactDescription: 'Support books and school fees.',
-        impactPercentage: 100,
+        impactPercentage: null,
         creator: {
           username: 'founder',
           fullName: 'Founder Name',

@@ -36,6 +36,7 @@ import { ScannerModule } from './modules/scanner/scanner.modules';
 import { RateLimitGuard } from './common/guards/rate-limit.guard';
 import { WalletModule } from './modules/wallet/wallet.module';
 import { validateEnvironment } from './config/runtime-env';
+import { ImpactModule } from './modules/impact/impact.module';
 
 @Module({
   imports: [
@@ -76,6 +77,7 @@ import { validateEnvironment } from './config/runtime-env';
     RegistrationModule,
     ScannerModule,
     WalletModule,
+    ImpactModule,
   ],
   controllers: [AppController],
   providers: [AppService, PrismaService, RateLimitGuard],

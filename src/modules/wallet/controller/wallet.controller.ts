@@ -24,13 +24,14 @@ import {
   CreateSettlementDto,
   InternalAlatQueueQueryDto,
   InternalKycQueueQueryDto,
-    PersonalLivenessDto,
-    NotifyOnKycResolutionDto,
-    ReviewKycDto,
-    ReviewPayoutProfileDto,
-    StartBusinessKycDto,
-    StartBusinessRepresentativeKycDto,
-    StartPersonalKycDto,
+  PersonalLivenessDto,
+  NotifyOnKycResolutionDto,
+  ReviewKycDto,
+  ReviewPayoutProfileDto,
+  ResolvePayoutAccountDto,
+  StartBusinessKycDto,
+  StartBusinessRepresentativeKycDto,
+  StartPersonalKycDto,
   SubmitKycDto,
   UpsertAlatProfileDto,
   UpsertPayoutProfileDto,
@@ -80,9 +81,18 @@ export class WalletController {
   }
 
   @Get('banks')
-  @ApiOperation({ summary: 'Get available payout banks from QoreID' })
+  @ApiOperation({ summary: 'Get available Nigerian payout banks from Paystack' })
   async getBanks() {
     return this.walletService.getBanks();
+  }
+
+  @Get('payout-profile/resolve-account')
+  @ApiOperation({ summary: 'Resolve payout account name with Paystack' })
+  async resolvePayoutAccount(
+    @CurrentUser('id') userId: string,
+    @Query() dto: ResolvePayoutAccountDto,
+  ) {
+    return this.walletService.resolvePayoutAccount(userId, dto);
   }
 
   @Get('alat-profile')
@@ -98,6 +108,12 @@ export class WalletController {
     @Body() dto: UpsertPayoutProfileDto,
   ) {
     return this.walletService.upsertPayoutProfile(userId, dto);
+  }
+
+  @Post('payout-profile/confirm')
+  @ApiOperation({ summary: 'Confirm resolved payout account name' })
+  async confirmPayoutProfile(@CurrentUser('id') userId: string) {
+    return this.walletService.confirmPayoutProfile(userId);
   }
 
   @Post('kyc/personal/start')
@@ -128,7 +144,9 @@ export class WalletController {
   }
 
   @Post('kyc/business/representative')
-  @ApiOperation({ summary: 'Start or update business representative KYC draft' })
+  @ApiOperation({
+    summary: 'Start or update business representative KYC draft',
+  })
   async startBusinessRepresentativeKyc(
     @CurrentUser('id') userId: string,
     @Body() dto: StartBusinessRepresentativeKycDto,
@@ -146,7 +164,9 @@ export class WalletController {
   }
 
   @Post('kyc/notify-on-resolution')
-  @ApiOperation({ summary: 'Notify creator when a pending provider verification resolves' })
+  @ApiOperation({
+    summary: 'Notify creator when a pending provider verification resolves',
+  })
   async notifyOnKycResolution(
     @CurrentUser('id') userId: string,
     @Body() dto: NotifyOnKycResolutionDto,
@@ -220,15 +240,35 @@ export class WalletController {
     return this.walletService.reviewKyc(userId, dto, opsKey);
   }
 
-  @Post('webhooks/qoreid')
+  @Post('webhooks/dikript')
   @Public()
-  @ApiOperation({ summary: 'Receive QoreID webhook callbacks' })
-  async handleQoreIdWebhook(
-    @Headers('x-verifyme-signature') signature: string,
-    @Req() req: any,
+  @ApiOperation({ summary: 'Receive Dikript webhook callbacks' })
+  async handleDikriptWebhook(
+    @Headers('x-dikript-signature') dikriptSignature: string,
+    @Headers('x-verifide-signature') verifideSignature: string,
+    @Req() req: { rawBody?: Buffer },
     @Body() body: any,
   ) {
-    return this.walletService.handleQoreIdWebhook(body, signature, req?.rawBody);
+    return this.walletService.handleDikriptWebhook(
+      body,
+      dikriptSignature || verifideSignature,
+      req?.rawBody,
+    );
+  }
+
+  @Post('webhooks/qoreid')
+  @Public()
+  @ApiOperation({ summary: 'Legacy KYC webhook callback alias' })
+  async handleLegacyKycWebhook(
+    @Headers('x-verifyme-signature') signature: string,
+    @Req() req: { rawBody?: Buffer },
+    @Body() body: any,
+  ) {
+    return this.walletService.handleDikriptWebhook(
+      body,
+      signature,
+      req?.rawBody,
+    );
   }
 
   @Post('internal/alat-profile/:userId')

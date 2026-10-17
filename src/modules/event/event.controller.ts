@@ -27,6 +27,7 @@ import { JwtAuthGuard } from 'src/common/guards/jwt-auth.guard';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { CreateEventTicketDto } from '../event-ticket/dto/create-event-ticket.dto';
+import { UpsertEventImpactReportDto } from './dto/upsert-event-impact-report.dto';
 
 enum RegistrationType {
   TICKET = 'ticket',
@@ -178,6 +179,26 @@ export class EventController {
     @Query('pageSize') pageSize?: number,
   ) {
     return this.eventService.getAllUserEvents(id || userId, page, pageSize);
+  }
+
+  @Get(':id/impact-report')
+  @ApiOperation({ summary: 'Get event impact report' })
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  getImpactReport(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.eventService.getImpactReport(userId, id);
+  }
+
+  @Post(':id/impact-report')
+  @ApiOperation({ summary: 'Submit or update post-event impact report' })
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  upsertImpactReport(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body() dto: UpsertEventImpactReportDto,
+  ) {
+    return this.eventService.upsertImpactReport(userId, id, dto);
   }
 
   @Get(':id')

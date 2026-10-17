@@ -36,7 +36,29 @@ const coerceBoolean = (value: unknown) => {
   return value === true || value === 'true' || value === 1 || value === '1';
 };
 
-const isPhysicalEventEnabled = (value: unknown) => value !== false && value !== 'false';
+const isPhysicalEventEnabled = (value: unknown) =>
+  value !== false && value !== 'false';
+
+const parseJsonArray = (value: unknown) => {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  return undefined;
+};
 
 export class CreateEventDto {
   @ApiProperty()
@@ -67,6 +89,35 @@ export class CreateEventDto {
   @Min(1)
   @Max(100)
   impactPercentage?: number;
+
+  @ApiPropertyOptional({ type: 'array' })
+  @IsOptional()
+  @Transform(({ value }) => parseJsonArray(value))
+  @IsArray()
+  impactSdgGoals?: Record<string, unknown>[];
+
+  @ApiPropertyOptional({ type: 'array' })
+  @IsOptional()
+  @Transform(({ value }) => parseJsonArray(value))
+  @IsArray()
+  impactPaths?: Record<string, unknown>[];
+
+  @ApiPropertyOptional({ type: 'array' })
+  @IsOptional()
+  @Transform(({ value }) => parseJsonArray(value))
+  @IsArray()
+  impactCommitments?: Record<string, unknown>[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  impactMapSource?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsDateString()
+  impactMapGeneratedAt?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -100,10 +151,25 @@ export class CreateEventDto {
   @Transform(({ value }) => normalizeEventLinks(value))
   links?: string[];
 
-  @ApiPropertyOptional({ type: [String] })
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Event interests, as an array or a JSON-encoded multipart array.',
+  })
   @IsOptional()
   @IsArray()
-  @Transform(({ value }) => (Array.isArray(value) ? value : [value]))
+  @IsString({ each: true })
+  @Transform(({ value }) => {
+    if (typeof value === 'string' && value.trim().startsWith('[')) {
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value;
+      }
+    }
+
+    return Array.isArray(value) ? value : [value];
+  })
   tags?: string[];
 
   @ApiProperty()
