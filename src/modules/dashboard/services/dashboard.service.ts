@@ -1,8 +1,23 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
-import { PaymentType, TransactionStatusType } from '@prisma/client';
+import { PaymentType, Prisma, TransactionStatusType } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { formatPayment } from 'src/utils';
 import { InternalAdminOverviewQueryDto } from '../dto/internal-overview.dto';
+
+const homeCardEventSelect = {
+  id: true,
+  title: true,
+  description: true,
+  imageUrl: true,
+  thumbnailUrl: true,
+  impactTitle: true,
+  impactDescription: true,
+  registrationType: true,
+} satisfies Prisma.EventSelect;
+
+type HomeCardEvent = Prisma.EventGetPayload<{
+  select: typeof homeCardEventSelect;
+}>;
 
 @Injectable()
 export class DashboardService {
@@ -207,7 +222,9 @@ export class DashboardService {
           label: 'Ticket Sales',
           eventCount: ticketEventCount,
           participants: ticketUnitsSoldAggregate._sum.sold || 0,
-          grossAmount: this.toCurrencyAmount(ticketSalesAggregate._sum.amount || 0),
+          grossAmount: this.toCurrencyAmount(
+            ticketSalesAggregate._sum.amount || 0,
+          ),
         },
         {
           key: 'donation',
@@ -240,27 +257,24 @@ export class DashboardService {
   async getHomeCards(userId: string) {
     const now = new Date();
 
-    const [featuredEvents, activeCarpools] = await Promise.all([
+    const [featuredEvents, impactEvent, activeCarpools] = await Promise.all([
       this.prisma.event.findMany({
+        where: { endDate: { gte: now } },
+        orderBy: { startDate: 'asc' },
+        take: 2,
+        select: homeCardEventSelect,
+      }),
+      this.prisma.event.findFirst({
         where: {
           endDate: { gte: now },
           OR: [
-            { impactPercentage: { not: null } },
             { impactTitle: { not: null } },
+            { impactDescription: { not: null } },
             { registrationType: 'donation' },
           ],
         },
-        orderBy: [{ impactPercentage: 'desc' }, { startDate: 'asc' }],
-        take: 2,
-        select: {
-          id: true,
-          title: true,
-          imageUrl: true,
-          thumbnailUrl: true,
-          impactTitle: true,
-          impactPercentage: true,
-          registrationType: true,
-        },
+        orderBy: { startDate: 'asc' },
+        select: homeCardEventSelect,
       }),
       this.prisma.carpool.count({
         where: {
@@ -281,26 +295,8 @@ export class DashboardService {
     const [featuredEvent, secondEvent] = featuredEvents;
 
     return [
-      {
-        id: featuredEvent ? `impact-${featuredEvent.id}` : 'impact-fallback',
-        key: 'impact',
-        variant: featuredEvent?.imageUrl || featuredEvent?.thumbnailUrl ? 'image' : 'copy',
-        eyebrow: 'Impact spotlight',
-        title:
-          featuredEvent?.title ||
-          'Discover events that do more than gather people',
-        body: this.buildImpactCardBody(featuredEvent),
-        cta:
-          featuredEvent?.registrationType === 'donation'
-            ? 'Donate now'
-            : 'See event',
-        route: featuredEvent ? `/event/${featuredEvent.id}` : null,
-        imageUrl: featuredEvent?.imageUrl || featuredEvent?.thumbnailUrl || null,
-        thumbnailUrl: featuredEvent?.thumbnailUrl || null,
-        eventId: featuredEvent?.id || null,
-        icon: 'sparkles-outline',
-        accentColor: '#0FF1CF',
-      },
+      this.buildEventHomeCard(featuredEvent, 'event'),
+      ...(impactEvent ? [this.buildEventHomeCard(impactEvent, 'impact')] : []),
       {
         id: `ride-${userId}`,
         key: 'ride',
@@ -324,13 +320,12 @@ export class DashboardService {
         key: 'circle',
         variant: 'copy',
         eyebrow: 'Circle',
-        title: secondEvent?.impactTitle
-          ? `Circle will connect people around ${secondEvent.impactTitle}`
-          : 'Circle will connect people around shared causes and momentum',
-        body:
-          secondEvent?.title
-            ? `${secondEvent.title} can become more than a moment when people have a space to keep the energy going.`
-            : 'Give communities a place to keep the conversation going before, during, and after the event.',
+        title: secondEvent?.title
+          ? `Circle will connect people around events like ${secondEvent.title}`
+          : 'Circle will connect people around events and shared interests',
+        body: secondEvent?.title
+          ? `${secondEvent.title} can become more than a moment when people have a space to keep the energy going.`
+          : 'Give communities a place to keep the conversation going before, during, and after the event.',
         cta: 'Preview Circle',
         route: '/circle',
         imageUrl: null,
@@ -386,30 +381,35 @@ export class DashboardService {
     };
   }
 
-  private buildImpactCardBody(
-    event?: {
-      impactTitle: string | null;
-      impactPercentage: number | null;
-      registrationType: string;
-    } | null,
+  private buildEventHomeCard(
+    event: HomeCardEvent | undefined,
+    key: 'event' | 'impact',
   ) {
-    if (!event) {
-      return 'Explore events where turnout, spending, and generosity all point toward something tangible.';
-    }
-
-    if (event.registrationType === 'donation') {
-      return `100% of every donation goes directly to ${event.impactTitle || 'the selected cause'}.`;
-    }
-
-    if (event.impactTitle && event.impactPercentage) {
-      return `${event.impactPercentage}% of event earnings are going to ${event.impactTitle.toLowerCase()}.`;
-    }
-
-    if (event.impactTitle) {
-      return `This event is backing ${event.impactTitle.toLowerCase()} with every turnout and transaction.`;
-    }
-
-    return 'Explore events where turnout, spending, and generosity all point toward something tangible.';
+    const isImpact = key === 'impact';
+    return {
+      id: event ? `${key}-${event.id}` : 'event-discovery',
+      key,
+      variant: event?.imageUrl || event?.thumbnailUrl ? 'image' : 'copy',
+      eyebrow: isImpact ? 'Impact spotlight' : 'Discover events',
+      title: event ? event.title : 'Find your next experience',
+      body: isImpact
+        ? event?.impactDescription ||
+          "Explore what this gathering contributes, in the organiser's own words."
+        : event?.description ||
+          'Discover music, culture, learning, and experiences that bring people together.',
+      cta:
+        isImpact && event?.registrationType === 'donation'
+          ? 'Donate now'
+          : event
+            ? 'See event'
+            : 'Explore events',
+      route: event ? `/event/${event.id}` : null,
+      imageUrl: event?.imageUrl || event?.thumbnailUrl || null,
+      thumbnailUrl: event?.thumbnailUrl || null,
+      eventId: event?.id || null,
+      icon: isImpact ? 'leaf-outline' : 'ticket-outline',
+      accentColor: '#0FF1CF',
+    };
   }
 
   private async getUserEvents(userId: string, dateFilter: any, take: number) {
@@ -447,7 +447,7 @@ export class DashboardService {
   private async getUserPayments(userId: string, skip: number, limit: number) {
     return this.prisma.transactionReference.findMany({
       where: {
-        creatorId:userId,
+        creatorId: userId,
         status: 'SUCCESS',
         eventId: { not: null },
       },
@@ -563,7 +563,9 @@ export class DashboardService {
     }
 
     const progress =
-      goalAmount > 0 ? Math.min(Math.round((grossAmount / goalAmount) * 100), 100) : 0;
+      goalAmount > 0
+        ? Math.min(Math.round((grossAmount / goalAmount) * 100), 100)
+        : 0;
     const status =
       event.startDate <= now && event.endDate >= now ? 'LIVE' : 'UPCOMING';
 

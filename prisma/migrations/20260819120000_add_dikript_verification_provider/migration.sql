@@ -1,0 +1,1 @@
+ALTER TYPE "VerificationProvider" ADD VALUE IF NOT EXISTS 'DIKRIPT';

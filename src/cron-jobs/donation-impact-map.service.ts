@@ -127,7 +127,7 @@ export class DonationImpactMapService {
           impactDescription:
             event.impactDescription ||
             'This campaign gives back directly to a real-world cause.',
-          impactPercentage: event.impactPercentage ?? 100,
+          impactPercentage: event.impactPercentage ?? undefined,
           campaignUrl: this.buildFrontendUrl(`/event/${event.id}`),
           campaignImage: event.thumbnailUrl || undefined,
         }),

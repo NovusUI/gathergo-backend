@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   NotFoundException,
   ForbiddenException,
@@ -6,6 +7,7 @@ import {
 import { PrismaService } from 'src/prisma/prisma.service';
 import {
   CreatorSettlementProfileStatus,
+  ImpactReportStatus,
   PaymentProvider,
   Prisma,
   Reoccurring,
@@ -18,12 +20,25 @@ import { MediaService } from '../media/media.service';
 import { EventTicketService } from '../event-ticket/event-ticket.service';
 import { CreateEventTicketDto } from '../event-ticket/dto/create-event-ticket.dto';
 import { getCheckoutPricingConfig } from '../transaction-reference/payment-pricing.util';
+import {
+  ImpactReportOutcomeDto,
+  UpsertEventImpactReportDto,
+} from './dto/upsert-event-impact-report.dto';
 
 type ParsedEventTicketDto = CreateEventTicketDto & {
   id?: string;
   isVisible?: boolean;
   updatedPrice?: number | null;
 };
+
+type ImpactMapInput = Pick<
+  CreateEventDto,
+  | 'impactSdgGoals'
+  | 'impactPaths'
+  | 'impactCommitments'
+  | 'impactMapSource'
+  | 'impactMapGeneratedAt'
+>;
 
 const eventCardInclude = {
   community: true,
@@ -109,10 +124,8 @@ export class EventService {
           description: dto.description,
           impactTitle: dto.impactTitle?.trim() || null,
           impactDescription: dto.impactDescription?.trim() || null,
-          impactPercentage: this.resolveImpactPercentage(
-            dto.registrationType,
-            dto.impactPercentage,
-          ),
+          impactPercentage: this.resolveImpactPercentage(dto.impactPercentage),
+          ...this.buildImpactMapCreateData(dto),
           isPhysicalEvent: dto.isPhysicalEvent !== false,
           location: dto.isPhysicalEvent === false ? null : dto.location,
           imageUrl: null,
@@ -190,26 +203,26 @@ export class EventService {
           title: dto.title ?? undefined,
           description: dto.description ?? undefined,
           impactTitle:
-            dto.impactTitle !== undefined ? dto.impactTitle?.trim() || null : undefined,
+            dto.impactTitle !== undefined
+              ? dto.impactTitle?.trim() || null
+              : undefined,
           impactDescription:
             dto.impactDescription !== undefined
               ? dto.impactDescription?.trim() || null
               : undefined,
           impactPercentage:
-            dto.impactPercentage !== undefined || effectiveRegistrationType === 'donation'
-              ? this.resolveImpactPercentage(
-                  effectiveRegistrationType,
-                  dto.impactPercentage,
-                )
+            dto.impactPercentage !== undefined
+              ? this.resolveImpactPercentage(dto.impactPercentage)
               : undefined,
+          ...this.buildImpactMapUpdateData(dto),
           isPhysicalEvent:
             dto.isPhysicalEvent !== undefined ? dto.isPhysicalEvent : undefined,
           location:
-            dto.isPhysicalEvent === false
-              ? null
-              : dto.location ?? undefined,
+            dto.isPhysicalEvent === false ? null : (dto.location ?? undefined),
           links:
-            dto.links !== undefined ? this.normalizeLinks(dto.links) : undefined,
+            dto.links !== undefined
+              ? this.normalizeLinks(dto.links)
+              : undefined,
           tags: dto.tags ?? undefined,
           reoccurring: dto.reoccurring ?? undefined,
           communityId: dto.communityId ?? undefined,
@@ -244,7 +257,10 @@ export class EventService {
         });
 
         // 3) Ticket updates
-        if (effectiveRegistrationType === 'ticket' && parsedTickets.length > 0) {
+        if (
+          effectiveRegistrationType === 'ticket' &&
+          parsedTickets.length > 0
+        ) {
           for (const ticket of parsedTickets) {
             const existingTicket = await tx.eventTicket.findUnique({
               where: { id: ticket.id },
@@ -361,19 +377,106 @@ export class EventService {
     return normalizeEventLinks(links);
   }
 
-  private resolveImpactPercentage(
-    registrationType?: string | null,
-    impactPercentage?: number | null,
-  ) {
-    if (registrationType === 'donation') {
-      return 100;
-    }
-
+  private resolveImpactPercentage(impactPercentage?: number | null) {
     if (impactPercentage === null || impactPercentage === undefined) {
       return null;
     }
 
     return Math.max(1, Math.min(100, Math.round(Number(impactPercentage))));
+  }
+
+  private buildImpactMapCreateData(dto: ImpactMapInput) {
+    return {
+      impactSdgGoals: this.normalizeJsonArray(dto.impactSdgGoals, 3),
+      impactPaths: this.normalizeJsonArray(dto.impactPaths, 3),
+      impactCommitments: this.normalizeJsonArray(dto.impactCommitments, 5),
+      impactMapSource: this.normalizeImpactMapSource(dto.impactMapSource),
+      impactMapGeneratedAt: this.resolveImpactMapGeneratedAt(dto),
+    };
+  }
+
+  private buildImpactMapUpdateData(
+    dto: Partial<ImpactMapInput>,
+  ): Prisma.EventUncheckedUpdateInput {
+    const data: Prisma.EventUncheckedUpdateInput = {};
+
+    if (dto.impactSdgGoals !== undefined) {
+      data.impactSdgGoals = this.normalizeJsonArray(dto.impactSdgGoals, 3);
+    }
+
+    if (dto.impactPaths !== undefined) {
+      data.impactPaths = this.normalizeJsonArray(dto.impactPaths, 3);
+    }
+
+    if (dto.impactCommitments !== undefined) {
+      data.impactCommitments = this.normalizeJsonArray(
+        dto.impactCommitments,
+        5,
+      );
+    }
+
+    if (dto.impactMapSource !== undefined) {
+      data.impactMapSource = this.normalizeImpactMapSource(dto.impactMapSource);
+    }
+
+    if (dto.impactMapGeneratedAt !== undefined) {
+      data.impactMapGeneratedAt = this.resolveImpactMapGeneratedAt(dto);
+    } else if (
+      [dto.impactSdgGoals, dto.impactPaths, dto.impactCommitments].some(
+        (items) => items !== undefined && items.length > 0,
+      )
+    ) {
+      data.impactMapGeneratedAt = new Date();
+    } else if (
+      [dto.impactSdgGoals, dto.impactPaths, dto.impactCommitments].every(
+        (items) => items !== undefined && items.length === 0,
+      )
+    ) {
+      data.impactMapGeneratedAt = null;
+    }
+
+    return data;
+  }
+
+  private normalizeJsonArray(
+    value: Record<string, unknown>[] | undefined,
+    limit: number,
+  ): Prisma.InputJsonValue | typeof Prisma.JsonNull {
+    if (!Array.isArray(value) || value.length === 0) {
+      return Prisma.JsonNull;
+    }
+
+    return value
+      .filter((item) => item && typeof item === 'object')
+      .slice(0, limit)
+      .map((item) => ({ ...item })) as Prisma.InputJsonValue;
+  }
+
+  private normalizeImpactMapSource(source?: string | null) {
+    if (!source?.trim()) {
+      return null;
+    }
+
+    return source.trim().slice(0, 40);
+  }
+
+  private resolveImpactMapGeneratedAt(dto: Partial<ImpactMapInput>) {
+    if (dto.impactMapGeneratedAt) {
+      const parsed = new Date(dto.impactMapGeneratedAt);
+      if (!Number.isNaN(parsed.getTime())) {
+        return parsed;
+      }
+    }
+
+    if (
+      [dto.impactSdgGoals, dto.impactPaths, dto.impactCommitments].some(
+        (items) => items !== undefined && items.length > 0,
+      )
+    ) {
+      return new Date();
+    }
+
+    return null;
   }
 
   private requiresSettlementProfile(input: {
@@ -433,15 +536,18 @@ export class EventService {
           },
         },
         eventTickets: true,
+        impactReport: true,
       },
     });
     if (!event) throw new NotFoundException('Event not found');
 
     const hasPaidTicket = event.eventTickets.some((ticket) => ticket.price > 0);
     const hasPaidRegistration =
-      event.registrationType === 'registration' && (event.registrationFee || 0) > 0;
+      event.registrationType === 'registration' &&
+      (event.registrationFee || 0) > 0;
     const acceptsDonations = event.registrationType === 'donation';
-    const requiresPayment = hasPaidTicket || hasPaidRegistration || acceptsDonations;
+    const requiresPayment =
+      hasPaidTicket || hasPaidRegistration || acceptsDonations;
 
     const creatorAlatProfile = await this.prisma.creatorAlatProfile.findUnique({
       where: { userId: event.creator.id },
@@ -463,12 +569,11 @@ export class EventService {
       creatorSettlementProfile?.status === 'ACTIVE' &&
       creatorAlatProfile?.status === 'ACTIVE' &&
       Boolean(creatorAlatProfile?.businessId);
-    const availableProviders =
-      supportsAlatTransfer
-        ? [PaymentProvider.PAYSTACK, PaymentProvider.ALAT_TRANSFER]
-        : requiresPayment
-          ? [PaymentProvider.PAYSTACK]
-          : [];
+    const availableProviders = supportsAlatTransfer
+      ? [PaymentProvider.PAYSTACK, PaymentProvider.ALAT_TRANSFER]
+      : requiresPayment
+        ? [PaymentProvider.PAYSTACK]
+        : [];
 
     // Calculate total donations for this event
     const totalDonationsResult = await this.prisma.donation.aggregate({
@@ -523,6 +628,143 @@ export class EventService {
         pricingConfig: getCheckoutPricingConfig({ availableProviders }),
       },
     };
+  }
+
+  async getImpactReport(userId: string, eventId: string) {
+    const event = await this.prisma.event.findUnique({
+      where: { id: eventId },
+      select: {
+        id: true,
+        creatorId: true,
+        endDate: true,
+        impactReport: true,
+      },
+    });
+
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+
+    return {
+      eventId: event.id,
+      report: event.impactReport,
+      canReport: event.creatorId === userId,
+      isEventEnded: this.hasEventEnded(event.endDate),
+    };
+  }
+
+  async upsertImpactReport(
+    userId: string,
+    eventId: string,
+    dto: UpsertEventImpactReportDto,
+  ) {
+    const event = await this.prisma.event.findUnique({
+      where: { id: eventId },
+      select: {
+        id: true,
+        creatorId: true,
+        endDate: true,
+      },
+    });
+
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+
+    if (event.creatorId !== userId) {
+      throw new ForbiddenException('Only the event creator can report impact');
+    }
+
+    if (!this.hasEventEnded(event.endDate)) {
+      throw new BadRequestException(
+        'Impact report can only be submitted after the event has ended',
+      );
+    }
+
+    const outcomes = this.normalizeImpactReportOutcomes(dto.outcomes);
+    const evidenceLinks = this.normalizeEvidenceLinks(dto.evidenceLinks);
+    const summary = this.normalizeImpactReportSummary(dto.summary);
+    const publishedAt = new Date();
+
+    return this.prisma.eventImpactReport.upsert({
+      where: { eventId },
+      create: {
+        eventId,
+        creatorId: userId,
+        summary,
+        outcomes,
+        evidenceLinks,
+        status: ImpactReportStatus.PUBLISHED,
+        publishedAt,
+      },
+      update: {
+        summary,
+        outcomes,
+        evidenceLinks,
+        status: ImpactReportStatus.PUBLISHED,
+        publishedAt,
+      },
+    });
+  }
+
+  private hasEventEnded(endDate: Date) {
+    return endDate.getTime() <= Date.now();
+  }
+
+  private normalizeImpactReportSummary(summary: string) {
+    const trimmedSummary = summary.trim();
+
+    if (trimmedSummary.length < 10) {
+      throw new BadRequestException(
+        'Impact report summary must be at least 10 characters',
+      );
+    }
+
+    return trimmedSummary.slice(0, 1000);
+  }
+
+  private normalizeImpactReportOutcomes(
+    outcomes: ImpactReportOutcomeDto[],
+  ): Prisma.InputJsonValue {
+    const normalized = (outcomes || [])
+      .filter((outcome) => outcome && typeof outcome === 'object')
+      .map((outcome, index) => {
+        const note = outcome.note?.trim().slice(0, 240);
+
+        return {
+          id:
+            outcome.id?.trim() ||
+            `${outcome.type || 'outcome'}_${outcome.value}_${index}`,
+          type: outcome.type.trim().slice(0, 80),
+          label: outcome.label.trim().slice(0, 120),
+          value: Number(outcome.value),
+          unit: outcome.unit.trim().slice(0, 40),
+          ...(note ? { note } : {}),
+        };
+      })
+      .filter(
+        (outcome) =>
+          outcome.type &&
+          outcome.label &&
+          outcome.unit &&
+          Number.isFinite(outcome.value) &&
+          outcome.value >= 0,
+      )
+      .slice(0, 20);
+
+    if (!normalized.length) {
+      throw new BadRequestException('At least one valid outcome is required');
+    }
+
+    return normalized as Prisma.InputJsonValue;
+  }
+
+  private normalizeEvidenceLinks(links?: string[] | null) {
+    if (!links?.length) {
+      return [];
+    }
+
+    return normalizeEventLinks(links).slice(0, 5);
   }
 
   // async update(userId: string, id: string, dto: UpdateEventDto) {

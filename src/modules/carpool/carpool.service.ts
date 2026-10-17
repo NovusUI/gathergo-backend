@@ -693,8 +693,12 @@ export class CarpoolService {
     }
 
     let estimatedDistance: string | null = null;
+    const startPoint =
+      data.startPoint?.lng != null && data.startPoint?.lat != null
+        ? data.startPoint
+        : null;
 
-    if (data.startPoint) {
+    if (startPoint) {
       const result = await this.prisma.$queryRawUnsafe<{ distance: number }[]>(
         `
         SELECT ST_DistanceSphere(
@@ -704,8 +708,8 @@ export class CarpoolService {
         FROM "Carpool" c
         WHERE c.id = $3
         `,
-        data.startPoint.lng,
-        data.startPoint.lat,
+        startPoint.lng,
+        startPoint.lat,
         carpoolId,
       );
 
@@ -716,6 +720,24 @@ export class CarpoolService {
       }
     }
 
+    const passengerInsertParams: Array<string | number | null> = [
+      passengerId,
+      carpoolId,
+      data.note ?? null,
+      data.origin,
+    ];
+
+    let passengerStartPointSql = 'NULL';
+    if (startPoint) {
+      passengerInsertParams.push(startPoint.lng, startPoint.lat);
+      const lngParamIndex = passengerInsertParams.length - 1;
+      const latParamIndex = passengerInsertParams.length;
+      passengerStartPointSql = `ST_SetSRID(ST_MakePoint($${lngParamIndex}, $${latParamIndex}), 4326)`;
+    }
+
+    passengerInsertParams.push(estimatedDistance);
+    const estimatedDistanceParamIndex = passengerInsertParams.length;
+
     const [created] = await this.prisma.$queryRawUnsafe<any>(
       `
       INSERT INTO "CarpoolPassenger" 
@@ -724,8 +746,8 @@ export class CarpoolService {
         gen_random_uuid(),
         $1, $2, $3, 'PENDING',
         $4,
-        ${data.startPoint ? 'ST_SetSRID(ST_MakePoint($5, $6), 4326)' : 'NULL'},
-        $7
+        ${passengerStartPointSql},
+        $${estimatedDistanceParamIndex}
       )
       RETURNING 
         id, "userId", "carpoolId", note, status, origin,
@@ -733,13 +755,7 @@ export class CarpoolService {
         "requestedAt",
         "estimatedDistance";
       `,
-      passengerId,
-      carpoolId,
-      data.note ?? null,
-      data.origin,
-      data.startPoint?.lng,
-      data.startPoint?.lat,
-      estimatedDistance,
+      ...passengerInsertParams,
     );
 
     await this.notificationService.createNotification({
@@ -1254,7 +1270,9 @@ export class CarpoolService {
       case 'departureTime':
         return `departure moved to ${this.formatCarpoolTime(change.newValue)}`;
       case 'note':
-        return change.newValue ? 'ride note was updated' : 'ride note was cleared';
+        return change.newValue
+          ? 'ride note was updated'
+          : 'ride note was cleared';
       case 'description':
         return change.newValue
           ? 'ride description was updated'

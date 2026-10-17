@@ -69,6 +69,7 @@ model User {
   kycVerification             CreatorKycVerification?
   settlementAccountChanges    SettlementAccountChange[]
   settlementRecords           SettlementRecord[]
+  impactReports               EventImpactReport[]
 }
 
 model UserPreference {
@@ -119,23 +120,28 @@ model CommunityFollow {
 }
 
 model Event {
-  id                    String           @id @default(uuid())
+  id                    String             @id @default(uuid())
   title                 String
   description           String?
   impactTitle           String?
   impactDescription     String?
   impactPercentage      Int?
-  isPhysicalEvent       Boolean          @default(true)
+  impactSdgGoals        Json?
+  impactPaths           Json?
+  impactCommitments     Json?
+  impactMapSource       String?
+  impactMapGeneratedAt  DateTime?
+  isPhysicalEvent       Boolean            @default(true)
   imageUrl              String?
   location              String?
   links                 String[]
   startDate             DateTime
   endDate               DateTime
-  reoccurring           Reoccurring      @default(NONE)
+  reoccurring           Reoccurring        @default(NONE)
   communityId           String?
   creatorId             String
-  createdAt             DateTime         @default(now())
-  updatedAt             DateTime         @updatedAt
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
   tags                  String[]
   endRepeat             DateTime?
   registrationAttendees Int?
@@ -145,19 +151,39 @@ model Event {
   thumbnailUrl          String?
   registrationType      RegistrationType
   carpools              Carpool[]
-  community             Community?       @relation("CommunityEvents", fields: [communityId], references: [id])
-  creator               User             @relation("UserEvents", fields: [creatorId], references: [id])
+  community             Community?         @relation("CommunityEvents", fields: [communityId], references: [id])
+  creator               User               @relation("UserEvents", fields: [creatorId], references: [id])
   eventTickets          EventTicket[]
   donations             Donation[]
   EventTrend            EventTrend?
   Post                  Post[]
   Registration          Registration[]
-  isImageProcessing     Boolean          @default(false)
+  isImageProcessing     Boolean            @default(false)
   feeds                 Feed[]
+  impactReport          EventImpactReport?
 
   transactions TransactionReference[]
 
   scanLogs ScanLog[]
+}
+
+model EventImpactReport {
+  id            String             @id @default(uuid())
+  eventId       String             @unique
+  creatorId     String
+  summary       String
+  outcomes      Json               @default("[]")
+  evidenceLinks String[]
+  status        ImpactReportStatus @default(PUBLISHED)
+  publishedAt   DateTime?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  event         Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  creator       User               @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  @@index([creatorId])
+  @@index([status])
+  @@index([publishedAt])
 }
 
 model EventTicket {
@@ -656,6 +682,7 @@ enum NameMatchStatus {
 
 enum VerificationProvider {
   QOREID
+  DIKRIPT
 }
 
 enum CreatorAlatProfileStatus {
@@ -678,6 +705,11 @@ enum Reoccurring {
   NONE
   DAILY
   WEEKLY
+}
+
+enum ImpactReportStatus {
+  DRAFT
+  PUBLISHED
 }
 
 enum PostType {

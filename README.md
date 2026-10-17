@@ -68,6 +68,27 @@ $ yarn run start:dev
 $ yarn run start:prod
 ```
 
+## Events and impact
+
+Events have their own description and interest tags. Impact stories and maps are
+optional; an ordinary event can be created without them. Multipart `tags` accepts
+repeated string values or a JSON-encoded array, including `[]` to clear interests.
+Home cards feature general events first, with a separate impact spotlight when
+available. Existing event records are preserved until their organiser edits them.
+
+Impact suggestions use DeepSeek through the authenticated
+`POST /api/v1/impact/suggestions` endpoint. Set `DEEPSEEK_API_KEY` on the backend
+only. `DEEPSEEK_MODEL` defaults to `deepseek-flash` and also supports
+`deepseek-v4-pro`; `DEEPSEEK_TIMEOUT_MS` defaults to `30000`. API details are in the
+[DeepSeek documentation](https://api-docs.deepseek.com/api/create-chat-completion/).
+The model reads the draft's event description and impact story, selects from the
+existing goal and path catalogs, and proposes numeric commitments only with
+quoted evidence from the draft. Responses are validated before returning them.
+There is no keyword fallback: missing credentials, provider failures, and invalid
+model responses report errors while the organiser can still publish without a
+map. Only organiser-selected suggestions are saved. Requests are limited to 30
+per minute per IP using the existing rate-limit guard.
+
 ## Run tests
 
 ```bash

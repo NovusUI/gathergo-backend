@@ -212,6 +212,15 @@ export function validateEnvironment(config: Record<string, unknown>) {
     SHADOW_DATABASE_URL: Joi.string().allow('').optional(),
     FRONTEND_URL: Joi.string().allow('').optional(),
     CORS_ALLOWED_ORIGINS: Joi.string().allow('').optional(),
+    DEEPSEEK_API_KEY: Joi.string().trim().allow('').optional(),
+    DEEPSEEK_MODEL: Joi.string()
+      .valid('deepseek-flash', 'deepseek-v4-pro')
+      .default('deepseek-flash'),
+    DEEPSEEK_TIMEOUT_MS: Joi.number()
+      .integer()
+      .min(1000)
+      .max(90000)
+      .default(30000),
     JWT_SECRET: Joi.string()
       .min(16)
       .when('NODE_ENV', { is: 'production', then: Joi.required() }),

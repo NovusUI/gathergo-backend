@@ -107,6 +107,7 @@ export class TransactionReferenceService {
       id: string;
       creatorId: string;
       title: string;
+      endDate: Date;
     } | null = null;
 
     for (const item of dto.items) {
@@ -118,6 +119,7 @@ export class TransactionReferenceService {
               id: true,
               creatorId: true,
               title: true,
+              endDate: true,
             },
           },
         },
@@ -132,12 +134,23 @@ export class TransactionReferenceService {
         continue;
       }
 
+      this.assertEventStillAcceptsPayments(eventTicket.event);
+
       if (!eventSummary) {
         eventSummary = eventTicket.event;
       } else if (eventSummary.id !== eventTicket.eventId) {
         throw new BadRequestException(
           'All tickets in one purchase must belong to the same event',
         );
+      }
+
+      if (eventTicket.isVisible === false) {
+        unavailableTickets.push({
+          id: item.id,
+          reason: 'Ticket is not live',
+          ticketName: eventTicket.type,
+        });
+        continue;
       }
 
       const unitPriceKobo = this.toKobo(
@@ -189,6 +202,12 @@ export class TransactionReferenceService {
 
     if (!eventSummary) {
       throw new BadRequestException('No valid ticket was provided');
+    }
+
+    if (paidTickets.length === 0 && freeTickets.length === 0) {
+      throw new BadRequestException(
+        unavailableTickets[0]?.reason || 'No available ticket was provided',
+      );
     }
 
     const pricing =
@@ -345,12 +364,15 @@ export class TransactionReferenceService {
         title: true,
         creatorId: true,
         registrationFee: true,
+        endDate: true,
       },
     });
 
     if (!event) {
       throw new NotFoundException('Event not found');
     }
+
+    this.assertEventStillAcceptsPayments(event);
 
     const grossAmountKobo = this.toKobo(event.registrationFee || 0);
     const pricing =
@@ -508,6 +530,7 @@ export class TransactionReferenceService {
         title: true,
         creatorId: true,
         registrationType: true,
+        endDate: true,
       },
     });
 
@@ -518,6 +541,8 @@ export class TransactionReferenceService {
     if (event.registrationType !== 'donation') {
       throw new BadRequestException('Event is not a donation event');
     }
+
+    this.assertEventStillAcceptsPayments(event);
 
     if (amount < 500) {
       throw new BadRequestException('Minimum donation amount is ₦500');
@@ -1616,7 +1641,7 @@ export class TransactionReferenceService {
       riskReasons.push('buyer_velocity_block');
       return {
         riskScore: 100,
-        riskStatus: RiskStatus.BLOCKED,
+        riskStatus: RiskStatus.HOLD,
         riskReasons,
         settlementStatus: SettlementStatus.HELD_RISK,
       };
@@ -1638,7 +1663,7 @@ export class TransactionReferenceService {
     ) {
       return {
         riskScore: 100,
-        riskStatus: RiskStatus.BLOCKED,
+        riskStatus: RiskStatus.HOLD,
         riskReasons: [...riskReasons, 'unverified_creator_exposure_cap'],
         settlementStatus: SettlementStatus.HELD_KYC,
       };
@@ -2009,6 +2034,26 @@ export class TransactionReferenceService {
 
   private toKobo(amount: number) {
     return Math.round(amount * 100);
+  }
+
+  private assertEventStillAcceptsPayments(event: {
+    endDate?: Date | string | null;
+  }) {
+    if (!event.endDate) {
+      return;
+    }
+
+    const eventEndDate =
+      event.endDate instanceof Date ? event.endDate : new Date(event.endDate);
+
+    if (
+      !Number.isNaN(eventEndDate.getTime()) &&
+      eventEndDate.getTime() <= Date.now()
+    ) {
+      throw new BadRequestException(
+        'This event has ended and is no longer accepting tickets, registrations, or donations',
+      );
+    }
   }
 
   private normalizeRegistrationBeneficiaryType(

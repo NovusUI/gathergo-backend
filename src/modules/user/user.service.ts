@@ -27,6 +27,7 @@ export class UserService {
     return await this.prisma.user.update({
       where: { id: userId },
       data: {
+        fullName: dto.fullName,
         username: dto.username,
         profilePicUrl: dto.profilePicUrl,
         phoneNumber: dto.phoneNumber,
