@@ -187,54 +187,63 @@ model EventImpactReport {
 }
 
 model EventTicket {
-  id           String   @id @default(uuid())
-  eventId      String
-  type         String
-  description  String
-  price        Float
-  quantity     Int
-  sold         Int      @default(0)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  perks        String[]
-  isVisible    Boolean  @default(true)
-  updatedPrice Float?
-  event        Event    @relation(fields: [eventId], references: [id])
-  tickets      Ticket[]
+  id               String                    @id @default(uuid())
+  eventId          String
+  type             String
+  description      String
+  price            Float
+  quantity         Int
+  sold             Int                       @default(0)
+  createdAt        DateTime                  @default(now())
+  updatedAt        DateTime                  @updatedAt
+  perks            String[]
+  isVisible        Boolean                   @default(true)
+  updatedPrice     Float?
+  event            Event                     @relation(fields: [eventId], references: [id])
+  tickets          Ticket[]
+  reservationItems CheckoutReservationItem[]
 }
 
 model Ticket {
-  id            String      @id @default(uuid())
-  userId        String
-  eventTicketId String
-  status        String      @default("active")
-  createdAt     DateTime    @default(now())
-  qrCode        String      @unique
-  isUsed        Boolean     @default(false)
-  transactionId String
-  eventTicket   EventTicket @relation(fields: [eventTicketId], references: [id])
-  user          User        @relation(fields: [userId], references: [id])
-  scannedAt     DateTime?
-  scannedBy     String?
-  scanLocation  String?
-  ScanLog       ScanLog[]
+  id             String      @id @default(uuid())
+  userId         String
+  eventTicketId  String
+  status         String      @default("active")
+  createdAt      DateTime    @default(now())
+  qrCode         String      @unique
+  isUsed         Boolean     @default(false)
+  transactionId  String
+  fulfillmentKey String?     @unique
+  eventTicket    EventTicket @relation(fields: [eventTicketId], references: [id])
+  user           User        @relation(fields: [userId], references: [id])
+  scannedAt      DateTime?
+  scannedBy      String?
+  scanLocation   String?
+  ScanLog        ScanLog[]
+
+  @@index([transactionId])
+  @@index([eventTicketId, status])
 }
 
 model Registration {
-  id            String    @id @default(uuid())
-  userId        String
-  status        String    @default("active")
-  createdAt     DateTime  @default(now())
-  qrCode        String    @unique
-  isUsed        Boolean   @default(false)
-  transactionId String
-  eventId       String
-  event         Event     @relation(fields: [eventId], references: [id])
-  user          User      @relation(fields: [userId], references: [id])
-  scannedAt     DateTime?
-  scannedBy     String?
-  scanLocation  String?
-  ScanLog       ScanLog[]
+  id             String    @id @default(uuid())
+  userId         String
+  status         String    @default("active")
+  createdAt      DateTime  @default(now())
+  qrCode         String    @unique
+  isUsed         Boolean   @default(false)
+  transactionId  String
+  fulfillmentKey String?   @unique
+  eventId        String
+  event          Event     @relation(fields: [eventId], references: [id])
+  user           User      @relation(fields: [userId], references: [id])
+  scannedAt      DateTime?
+  scannedBy      String?
+  scanLocation   String?
+  ScanLog        ScanLog[]
+
+  @@index([transactionId])
+  @@index([eventId, userId, status])
 }
 
 model Donation {
@@ -258,35 +267,44 @@ model Donation {
 }
 
 model TransactionReference {
-  id                    String                 @id @default(uuid())
-  userId                String
-  creatorId             String?
-  amount                Int
-  platformFee           Int                    @default(0)
-  providerFee           Int                    @default(0)
-  creatorPayable        Int                    @default(0)
-  createdAt             DateTime               @default(now())
-  updatedAt             DateTime               @updatedAt
-  metadata              Json
-  riskReasons           Json                   @default("[]")
-  status                TransactionStatusType  @default(PENDING)
-  paymentProvider       PaymentProvider        @default(PAYSTACK)
-  paymentType           PaymentType?
-  settlementStatus      SettlementStatus       @default(NOT_READY)
-  riskStatus            RiskStatus             @default(CLEAR)
-  riskScore             Int                    @default(0)
-  providerReference     String?
-  providerPayload       Json?
-  fulfilledAt           DateTime?
-  settledAt             DateTime?
-  reviewedAt            DateTime?
-  user                  User                   @relation("BuyerTransactions", fields: [userId], references: [id])
-  creator               User?                  @relation("CreatorTransactions", fields: [creatorId], references: [id])
-  eventId               String?
-  event                 Event?                 @relation(fields: [eventId], references: [id])
-  settlementAllocations SettlementAllocation[]
-  webhookEvents         ProviderWebhookEvent[]
+  id                      String                       @id @default(uuid())
+  userId                  String
+  creatorId               String?
+  amount                  Int
+  platformFee             Int                          @default(0)
+  providerFee             Int                          @default(0)
+  creatorPayable          Int                          @default(0)
+  createdAt               DateTime                     @default(now())
+  updatedAt               DateTime                     @updatedAt
+  metadata                Json
+  riskReasons             Json                         @default("[]")
+  status                  TransactionStatusType        @default(PENDING)
+  paymentProvider         PaymentProvider              @default(PAYSTACK)
+  paymentType             PaymentType?
+  settlementStatus        SettlementStatus             @default(NOT_READY)
+  riskStatus              RiskStatus                   @default(CLEAR)
+  riskScore               Int                          @default(0)
+  providerReference       String?
+  providerPayload         Json?
+  fulfilledAt             DateTime?
+  idempotencyKey          String?
+  requestHash             String?
+  paymentUrl              String?
+  initializationStatus    CheckoutInitializationStatus @default(NOT_STARTED)
+  initializationStartedAt DateTime?
+  settledAt               DateTime?
+  reviewedAt              DateTime?
+  user                    User                         @relation("BuyerTransactions", fields: [userId], references: [id])
+  creator                 User?                        @relation("CreatorTransactions", fields: [creatorId], references: [id])
+  eventId                 String?
+  event                   Event?                       @relation(fields: [eventId], references: [id])
+  settlementAllocations   SettlementAllocation[]
+  webhookEvents           ProviderWebhookEvent[]
+  reservation             CheckoutReservation?
+  refund                  CheckoutRefund?
+  fulfillmentJob          CheckoutFulfillmentJob?
 
+  @@unique([userId, idempotencyKey])
   @@index([eventId, status])
   @@index([creatorId, status])
   @@index([creatorId, settlementStatus])
@@ -452,9 +470,93 @@ model ProviderWebhookEvent {
   transactionReferenceId String?
   payload                Json
   createdAt              DateTime              @default(now())
+  processedAt            DateTime?
+  attempts               Int                   @default(0)
+  lastError              String?
   transactionReference   TransactionReference? @relation(fields: [transactionReferenceId], references: [id], onDelete: SetNull)
 
   @@index([provider, createdAt])
+}
+
+model CheckoutReservation {
+  transactionId String                    @id
+  status        ReservationStatus         @default(HELD)
+  expiresAt     DateTime
+  transaction   TransactionReference      @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  items         CheckoutReservationItem[]
+
+  @@index([status, expiresAt])
+}
+
+model CheckoutReservationItem {
+  id            String              @id @default(uuid())
+  reservationId String
+  eventTicketId String
+  quantity      Int
+  reservation   CheckoutReservation @relation(fields: [reservationId], references: [transactionId], onDelete: Cascade)
+  eventTicket   EventTicket         @relation(fields: [eventTicketId], references: [id])
+
+  @@unique([reservationId, eventTicketId])
+  @@index([eventTicketId])
+}
+
+model CheckoutRefund {
+  transactionId         String               @id
+  amountKobo            Int
+  reason                String
+  status                CheckoutRefundStatus @default(REQUESTED)
+  providerTransactionId String?
+  providerRefundId      Int?
+  attempts              Int                  @default(0)
+  nextAttemptAt         DateTime             @default(now())
+  leaseExpiresAt        DateTime?
+  lastError             String?
+  confirmedReference    String?
+  confirmedAt           DateTime?
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+  transaction           TransactionReference @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+}
+
+model CheckoutFulfillmentJob {
+  transactionId  String               @id
+  status         CheckoutJobStatus    @default(PENDING)
+  attempts       Int                  @default(0)
+  nextAttemptAt  DateTime             @default(now())
+  leaseExpiresAt DateTime?
+  lastError      String?
+  transaction    TransactionReference @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+}
+
+enum ReservationStatus {
+  HELD
+  CONFIRMED
+  EXPIRED
+  CANCELLED
+}
+
+enum CheckoutInitializationStatus {
+  NOT_STARTED
+  INITIALIZING
+  READY
+  FAILED
+}
+
+enum CheckoutRefundStatus {
+  REQUESTED
+  PROCESSING
+  REFUNDED
+  MANUAL_REQUIRED
+}
+
+enum CheckoutJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
 }
 
 model Carpool {
@@ -616,6 +718,9 @@ enum TransactionStatusType {
   PENDING
   FAILED
   AWAITING_TRANSFER
+  EXPIRED
+  REFUND_REQUIRED
+  REFUNDED
 }
 
 enum PaymentProvider {

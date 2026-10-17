@@ -1,6 +1,7 @@
 // registration.service.ts
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { generateOpaqueCode } from 'src/common/utils/generate-opaque-code.util';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { NotificationService } from '../notification/notification.service';
 import { notificationConstants } from 'src/common/constants';
@@ -18,54 +19,37 @@ export class RegistrationService {
     private readonly mailService: MailService,
   ) {}
 
-  async createRegistration(
+  async issue(
+    tx: Prisma.TransactionClient,
     eventId: string,
     userId: string,
     transactionId: string,
   ) {
-    // Check if event exists
-    const event = await this.prisma.event.findUnique({
-      where: { id: eventId },
-      select: {
-        id: true,
-        title: true,
-        creatorId: true,
-        registrationFee: true,
-        thumbnailUrl: true,
-      },
+    const existing = await tx.registration.findFirst({
+      where: { transactionId },
     });
-
-    if (!event) {
-      throw new NotFoundException('Event not found');
-    }
-
-    // Check if user is already registered
-    const existingRegistration = await this.prisma.registration.findFirst({
-      where: {
-        eventId,
-        userId,
-        status: 'active',
-      },
-    });
-
-    if (existingRegistration && event.registrationFee === 0) {
-      throw new Error('User is already registered for this event');
-    }
-
-    // Create registration
-    const registration = await this.prisma.registration.create({
+    if (existing) return existing;
+    return tx.registration.create({
       data: {
         eventId,
         userId,
-        qrCode: generateOpaqueCode(16),
         transactionId,
+        qrCode: generateOpaqueCode(16),
+        fulfillmentKey: transactionId,
         status: 'active',
       },
+    });
+  }
+
+  async notifyRegistration(transactionId: string) {
+    const registration = await this.prisma.registration.findFirst({
+      where: { transactionId },
       include: {
         event: {
           select: {
             id: true,
             title: true,
+            creatorId: true,
             thumbnailUrl: true,
             startDate: true,
             endDate: true,
@@ -73,44 +57,30 @@ export class RegistrationService {
           },
         },
         user: {
-          select: {
-            id: true,
-            username: true,
-            fullName: true,
-            email: true,
-          },
+          select: { id: true, username: true, fullName: true, email: true },
         },
       },
     });
-
-    // Send notification to event creator
-    this.notificationService
-      .createNotification({
-        recipientIds: [event.creatorId],
-        title: notificationConstants.EVENT_REGISTRATION_TITLE,
-        message: notificationConstants.EVENT_REGISTRATION_MESSAGE(
-          registration.user.username || registration.user.fullName || 'Someone',
-        ),
-        type: notificationConstants.EVENT_REGISTRATION,
-        imageUrl: event.thumbnailUrl || '',
-        data: {
-          eventId: event.id,
-          registrationId: registration.id,
-        },
-        link: '/event/' + event.id,
-      })
-      .then(() => {});
-
-    // Generate feed for registration
-    this.feedIntegrationService
-      .onRegistrationCompleted(eventId, userId, registration.id, {
-        beneficiaryType: 'SELF',
-      })
-      .then(() => {});
-
+    if (!registration)
+      throw new NotFoundException('Registration not found for this checkout');
+    await this.notificationService.createNotification({
+      recipientIds: [registration.event.creatorId],
+      title: notificationConstants.EVENT_REGISTRATION_TITLE,
+      message: notificationConstants.EVENT_REGISTRATION_MESSAGE(
+        registration.user.username || registration.user.fullName || 'Someone',
+      ),
+      type: notificationConstants.EVENT_REGISTRATION,
+      imageUrl: registration.event.thumbnailUrl || '',
+      data: { eventId: registration.event.id, registrationId: registration.id },
+      link: '/event/' + registration.event.id,
+    });
+    await this.feedIntegrationService.onRegistrationCompleted(
+      registration.event.id,
+      registration.userId,
+      registration.id,
+      { beneficiaryType: 'SELF' },
+    );
     await this.queueRegistrationConfirmationEmail(registration);
-
-    return registration;
   }
 
   async recordSponsoredRegistration(
@@ -143,28 +113,29 @@ export class RegistrationService {
 
     const sponsorName = sponsor?.username || sponsor?.fullName || 'Someone';
 
-    this.notificationService
-      .createNotification({
-        recipientIds: [event.creatorId],
-        title: notificationConstants.EVENT_REGISTRATION_TITLE,
-        message: `${sponsorName} funded a registration spot for your event`,
-        type: notificationConstants.EVENT_REGISTRATION,
-        imageUrl: event.thumbnailUrl || '',
-        data: {
-          eventId: event.id,
-          transactionId,
-          beneficiaryType: 'SPONSORED',
-        },
-        link: '/event/' + event.id,
-      })
-      .then(() => {});
+    await this.notificationService.createNotification({
+      recipientIds: [event.creatorId],
+      title: notificationConstants.EVENT_REGISTRATION_TITLE,
+      message: `${sponsorName} funded a registration spot for your event`,
+      type: notificationConstants.EVENT_REGISTRATION,
+      imageUrl: event.thumbnailUrl || '',
+      data: {
+        eventId: event.id,
+        transactionId,
+        beneficiaryType: 'SPONSORED',
+      },
+      link: '/event/' + event.id,
+    });
 
-    this.feedIntegrationService
-      .onRegistrationCompleted(eventId, sponsorUserId, null, {
+    await this.feedIntegrationService.onRegistrationCompleted(
+      eventId,
+      sponsorUserId,
+      null,
+      {
         beneficiaryType: 'SPONSORED',
         sponsorshipNote: sponsorshipNote || null,
-      })
-      .then(() => {});
+      },
+    );
 
     return {
       eventId,
@@ -217,6 +188,7 @@ export class RegistrationService {
     try {
       const result = await this.mailService.sendRegistrationConfirmation({
         to: registration.user.email,
+        jobId: `registration-confirmation-${registration.id}`,
         name: this.resolveDisplayName(registration.user),
         eventTitle: registration.event.title,
         eventDate: registration.event.startDate.toLocaleDateString(),
@@ -240,6 +212,7 @@ export class RegistrationService {
       this.logger.warn(
         `Failed to queue registration confirmation email for ${registration.user.email}: ${reason}`,
       );
+      throw error;
     }
   }
 

@@ -56,6 +56,8 @@ describe('TransactionReferenceService', () => {
       {} as any,
       {} as any,
       {} as any,
+      { maxTickets: 4,
+        validateQuantity: jest.fn(), hashRequest: jest.fn().mockReturnValue('hash'), findReplay: jest.fn().mockResolvedValue(null) } as any,
     );
   });
 
@@ -101,7 +103,7 @@ describe('TransactionReferenceService', () => {
             quantity: 1,
           },
         ],
-      }),
+      }, '11111111-1111-4111-8111-111111111111'),
     ).rejects.toThrow(
       'This event has ended and is no longer accepting tickets, registrations, or donations',
     );
@@ -136,8 +138,8 @@ describe('TransactionReferenceService', () => {
             quantity: 1,
           },
         ],
-      }),
-    ).rejects.toThrow('Ticket is not live');
+      }, '11111111-1111-4111-8111-111111111111'),
+    ).rejects.toThrow('A selected ticket is not on sale.');
 
     expect(prisma.transactionReference.create).not.toHaveBeenCalled();
   });
@@ -156,6 +158,7 @@ describe('TransactionReferenceService', () => {
         'buyer_123',
         'buyer@example.com',
         'event_ended',
+        '11111111-1111-4111-8111-111111111111',
       ),
     ).rejects.toThrow(
       'This event has ended and is no longer accepting tickets, registrations, or donations',

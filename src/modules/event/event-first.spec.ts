@@ -44,6 +44,7 @@ describe('Event-first flows', () => {
 
   it('creates an event without adding an impact identity or map', async () => {
     const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'event-1' }]),
       event: {
         create: jest
           .fn<Promise<{ id: string }>, [Prisma.EventCreateArgs]>()
@@ -83,6 +84,7 @@ describe('Event-first flows', () => {
 
   it('removes an impact story and map while preserving event interests', async () => {
     const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'event-1' }]),
       event: {
         update: jest
           .fn<Promise<{ id: string }>, [Prisma.EventUpdateArgs]>()

@@ -17,6 +17,11 @@ import {
   TransactionStatusType,
 } from '@prisma/client';
 import * as crypto from 'crypto';
+import { CheckoutService } from '../checkout/checkout.service';
+import {
+  CheckoutMetadata,
+  PurchasedTicketItem,
+} from '../checkout/checkout.types';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { DonationService } from '../donation/donation.service';
 import { PaystackService } from '../paystack/paystack.service';
@@ -90,19 +95,37 @@ export class TransactionReferenceService {
     private readonly donationService: DonationService,
     private readonly ticketService: TicketService,
     private readonly registrationService: RegistrationService,
+    private readonly checkout: CheckoutService,
   ) {}
 
   async initiate(
     userId: string,
     email: string,
     dto: CreateTransactionReferenceDto,
+    idempotencyKey: string,
   ) {
     const provider = this.resolvePaymentProvider(dto.provider);
+    const quantities = new Map<string, number>();
+    for (const item of dto.items)
+      quantities.set(item.id, (quantities.get(item.id) ?? 0) + item.quantity);
+    const items = [...quantities]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([id, quantity]) => ({ id, quantity }));
+    this.checkout.validateQuantity(items);
+    const requestHash = this.checkout.hashRequest({
+      type: PaymentType.TICKET,
+      provider,
+      items,
+    });
+    const replay = await this.checkout.findReplay(
+      userId,
+      idempotencyKey,
+      requestHash,
+    );
+    if (replay) return this.checkout.format(replay);
     let totalAmountKobo = 0;
-    let expectedAmountKobo = 0;
-    const freeTickets: any[] = [];
-    const paidTickets: any[] = [];
-    const unavailableTickets: TicketAvailability[] = [];
+    const freeTickets: PurchasedTicketItem[] = [];
+    const paidTickets: NonNullable<CheckoutMetadata['paidTickets']> = [];
     let eventSummary: {
       id: string;
       creatorId: string;
@@ -110,7 +133,7 @@ export class TransactionReferenceService {
       endDate: Date;
     } | null = null;
 
-    for (const item of dto.items) {
+    for (const item of items) {
       const eventTicket = await this.prisma.eventTicket.findUnique({
         where: { id: item.id },
         include: {
@@ -125,14 +148,7 @@ export class TransactionReferenceService {
         },
       });
 
-      if (!eventTicket) {
-        unavailableTickets.push({
-          id: item.id,
-          reason: 'Ticket not found',
-          ticketName: item.ticketName,
-        });
-        continue;
-      }
+      if (!eventTicket) throw new NotFoundException('Ticket not found');
 
       this.assertEventStillAcceptsPayments(eventTicket.event);
 
@@ -144,53 +160,22 @@ export class TransactionReferenceService {
         );
       }
 
-      if (eventTicket.isVisible === false) {
-        unavailableTickets.push({
-          id: item.id,
-          reason: 'Ticket is not live',
-          ticketName: eventTicket.type,
-        });
-        continue;
-      }
+      if (!eventTicket.isVisible)
+        throw new BadRequestException('A selected ticket is not on sale.');
 
       const unitPriceKobo = this.toKobo(
         eventTicket.updatedPrice ?? eventTicket.price,
       );
-      const availableStock = Math.max(
-        eventTicket.quantity - eventTicket.sold,
-        0,
-      );
-      const availableQty = Math.min(item.quantity, availableStock);
-
-      expectedAmountKobo += item.quantity * unitPriceKobo;
-
-      if (availableQty === 0) {
-        unavailableTickets.push({
-          id: item.id,
-          reason: 'Out of stock',
-          ticketName: eventTicket.type,
-        });
-        continue;
-      }
-
-      if (availableQty < item.quantity) {
-        unavailableTickets.push({
-          id: item.id,
-          reason: `Only ${availableQty} tickets available out of requested ${item.quantity}`,
-          ticketName: eventTicket.type,
-        });
-      }
-
       const ticketPayload = {
         eventTicketId: item.id,
-        quantity: availableQty,
+        quantity: item.quantity,
         ticketName: eventTicket.type,
       };
 
       if (unitPriceKobo === 0) {
         freeTickets.push(ticketPayload);
       } else {
-        const totalPriceKobo = unitPriceKobo * availableQty;
+        const totalPriceKobo = unitPriceKobo * item.quantity;
         paidTickets.push({
           ...ticketPayload,
           totalPriceKobo,
@@ -200,15 +185,8 @@ export class TransactionReferenceService {
       }
     }
 
-    if (!eventSummary) {
+    if (!eventSummary)
       throw new BadRequestException('No valid ticket was provided');
-    }
-
-    if (paidTickets.length === 0 && freeTickets.length === 0) {
-      throw new BadRequestException(
-        unavailableTickets[0]?.reason || 'No available ticket was provided',
-      );
-    }
 
     const pricing =
       totalAmountKobo > 0
@@ -240,112 +218,47 @@ export class TransactionReferenceService {
           )
         : null;
 
-    const metadata = {
+    const metadata: CheckoutMetadata = {
       type: PaymentType.TICKET,
       amountUnit: 'KOBO',
       eventId: eventSummary.id,
       eventTitle: eventSummary.title,
       paidTickets,
       freeTickets,
-      unavailableTickets,
-      clientContext: this.serializeClientContext(dto.clientContext),
       pricing,
+      clientContext: this.serializeClientContext(dto.clientContext),
     };
 
-    const transactionRef = await this.prisma.transactionReference.create({
+    const transactionRef = await this.checkout.create({
+      userId,
+      eventId: eventSummary.id,
+      idempotencyKey,
+      requestHash,
+      paymentType: PaymentType.TICKET,
+      provider,
+      metadata,
       data: {
-        userId,
         creatorId: eventSummary.creatorId,
         amount: pricing.chargeAmountKobo,
-        eventId: eventSummary.id,
         platformFee: pricing.platformFeeKobo,
         providerFee: pricing.providerFeeKobo,
         creatorPayable: pricing.creatorPayableKobo,
-        paymentProvider: provider,
-        paymentType: PaymentType.TICKET,
+        status: this.getInitialPendingStatus(provider),
         settlementStatus: riskAssessment.settlementStatus,
         riskStatus: riskAssessment.riskStatus,
         riskScore: riskAssessment.riskScore,
         riskReasons: riskAssessment.riskReasons,
-        status:
-          totalAmountKobo > 0
-            ? this.getInitialPendingStatus(provider)
-            : expectedAmountKobo > 0
-              ? TransactionStatusType.FAILED
-              : TransactionStatusType.SUCCESS,
-        metadata: this.asInputJson(metadata),
       },
     });
 
-    if (totalAmountKobo === 0 && freeTickets.length > 0) {
-      await this.ticketService.create(
-        transactionRef,
-        freeTickets,
-        eventSummary.id,
-      );
-    }
-
-    let providerInitResponse: ProviderInitiationResult = {
-      paymentUrl: null,
-      instructions: null,
-    };
-
-    if (totalAmountKobo > 0) {
-      providerInitResponse = await this.initializeProviderPayment({
-        provider,
-        userId,
-        email,
-        reference: transactionRef.id,
-        amountKobo: pricing.chargeAmountKobo,
-        eventTitle: eventSummary.title,
-        eventId: eventSummary.id,
-        paymentType: PaymentType.TICKET,
-        creatorId: eventSummary.creatorId,
-        alatProfile,
-      });
-
-      await this.prisma.transactionReference.update({
-        where: { id: transactionRef.id },
-        data: {
-          ...(providerInitResponse.providerReference
-            ? { providerReference: providerInitResponse.providerReference }
-            : {}),
-          ...(providerInitResponse.providerPayload
-            ? {
-                providerPayload: this.asInputJson(
-                  providerInitResponse.providerPayload,
-                ),
-              }
-            : {}),
-          metadata: this.asInputJson({
-            ...metadata,
-            providerInstructions: providerInitResponse.instructions || null,
-          }),
-        },
-      });
-    }
-
-    return {
-      message: providerInitResponse.message || 'Transaction initialized',
-      transactionId: transactionRef.id,
-      paymentProvider: provider,
-      paymentUrl: providerInitResponse.paymentUrl,
-      paymentInstructions: providerInitResponse.instructions || null,
-      unavailableTickets,
-      freeTickets: totalAmountKobo === 0 ? freeTickets : [],
-      totalAmount: pricing.chargeAmountNaira,
-      totalAmountKobo: pricing.chargeAmountKobo,
-      pricing,
-      riskStatus: riskAssessment.riskStatus,
-      settlementStatus: riskAssessment.settlementStatus,
-      status: providerInitResponse.status ?? true,
-    };
+    return this.initializeCheckout(transactionRef.id, email, alatProfile);
   }
 
   async initiateRegistration(
     userId: string,
     email: string,
     eventId: string,
+    idempotencyKey: string,
     paymentOptions?: {
       beneficiaryType?: string;
       sponsorshipNote?: string;
@@ -357,6 +270,19 @@ export class TransactionReferenceService {
     const beneficiaryType = this.normalizeRegistrationBeneficiaryType(
       paymentOptions?.beneficiaryType,
     );
+    const requestHash = this.checkout.hashRequest({
+      type: PaymentType.REGISTRATION,
+      eventId,
+      provider,
+      beneficiaryType,
+      sponsorshipNote: paymentOptions?.sponsorshipNote?.trim() || null,
+    });
+    const replay = await this.checkout.findReplay(
+      userId,
+      idempotencyKey,
+      requestHash,
+    );
+    if (replay) return this.checkout.format(replay);
     const event = await this.prisma.event.findUnique({
       where: { id: eventId },
       select: {
@@ -410,109 +336,83 @@ export class TransactionReferenceService {
           })
         : null;
 
-    const metadata = {
+    const metadata: CheckoutMetadata = {
       type: PaymentType.REGISTRATION,
       amountUnit: 'KOBO',
       eventId,
       eventTitle: event.title,
-      clientContext: this.serializeClientContext(paymentOptions?.clientContext),
       pricing,
+      clientContext: this.serializeClientContext(paymentOptions?.clientContext),
       ...(sponsorship ? { sponsorship } : {}),
     };
 
-    const transactionRef = await this.prisma.transactionReference.create({
+    const transactionRef = await this.checkout.create({
+      userId,
+      eventId,
+      idempotencyKey,
+      requestHash,
+      paymentType: PaymentType.REGISTRATION,
+      provider,
+      metadata,
       data: {
-        userId,
         creatorId: event.creatorId,
         amount: pricing.chargeAmountKobo,
-        eventId,
         platformFee: pricing.platformFeeKobo,
         providerFee: pricing.providerFeeKobo,
         creatorPayable: pricing.creatorPayableKobo,
-        paymentProvider: provider,
-        paymentType: PaymentType.REGISTRATION,
+        status: this.getInitialPendingStatus(provider),
         settlementStatus: riskAssessment.settlementStatus,
         riskStatus: riskAssessment.riskStatus,
         riskScore: riskAssessment.riskScore,
         riskReasons: riskAssessment.riskReasons,
-        status:
-          grossAmountKobo > 0
-            ? this.getInitialPendingStatus(provider)
-            : TransactionStatusType.SUCCESS,
-        metadata: this.asInputJson(metadata),
       },
     });
 
-    if (grossAmountKobo === 0) {
-      if (beneficiaryType === 'SPONSORED') {
-        await this.registrationService.recordSponsoredRegistration(
-          eventId,
-          userId,
-          transactionRef.id,
-          sponsorship?.sponsorshipNote,
-        );
-      } else {
-        await this.registrationService.createRegistration(
-          eventId,
-          userId,
-          transactionRef.id,
-        );
-      }
-    }
+    return this.initializeCheckout(transactionRef.id, email, alatProfile);
+  }
 
-    let providerInitResponse: ProviderInitiationResult = {
-      paymentUrl: null,
-      instructions: null,
-    };
-
-    if (grossAmountKobo > 0) {
-      providerInitResponse = await this.initializeProviderPayment({
-        provider,
-        userId,
+  private async initializeCheckout(
+    id: string,
+    email: string,
+    alatProfile: Awaited<
+      ReturnType<TransactionReferenceService['getActiveAlatProfileIfNeeded']>
+    >,
+  ) {
+    const record = await this.checkout.get(id);
+    if (!(await this.checkout.claimInitialization(id)))
+      return this.checkout.format(record);
+    try {
+      const metadata = this.checkout.metadata(record);
+      const result = await this.initializeProviderPayment({
+        provider: record.paymentProvider,
+        userId: record.userId,
         email,
-        reference: transactionRef.id,
-        amountKobo: pricing.chargeAmountKobo,
-        eventTitle: event.title,
-        eventId,
-        paymentType: PaymentType.REGISTRATION,
-        creatorId: event.creatorId,
+        reference: id,
+        amountKobo: record.amount,
+        eventTitle: metadata.eventTitle,
+        eventId: metadata.eventId,
+        paymentType: record.paymentType!,
+        creatorId: record.creatorId!,
         alatProfile,
       });
-
-      await this.prisma.transactionReference.update({
-        where: { id: transactionRef.id },
-        data: {
-          ...(providerInitResponse.providerReference
-            ? { providerReference: providerInitResponse.providerReference }
-            : {}),
-          ...(providerInitResponse.providerPayload
-            ? {
-                providerPayload: this.asInputJson(
-                  providerInitResponse.providerPayload,
-                ),
-              }
-            : {}),
-          metadata: this.asInputJson({
-            ...metadata,
-            providerInstructions: providerInitResponse.instructions || null,
-          }),
-        },
-      });
+      if (result.status === false)
+        throw new BadGatewayException(
+          'The payment provider could not initialize checkout.',
+        );
+      return this.checkout.format(
+        await this.checkout.finishInitialization(id, {
+          paymentUrl: result.paymentUrl,
+          providerReference: result.providerReference,
+          providerPayload: result.providerPayload
+            ? this.asInputJson(result.providerPayload)
+            : undefined,
+          instructions: result.instructions,
+        }),
+      );
+    } catch (error) {
+      await this.checkout.initializationFailed(id);
+      throw error;
     }
-
-    return {
-      message: providerInitResponse.message || 'Transaction initialized',
-      status: providerInitResponse.status ?? true,
-      transactionId: transactionRef.id,
-      paymentProvider: provider,
-      paymentUrl: providerInitResponse.paymentUrl,
-      paymentInstructions: providerInitResponse.instructions || null,
-      totalAmount: pricing.chargeAmountNaira,
-      totalAmountKobo: pricing.chargeAmountKobo,
-      pricing,
-      settlementStatus: riskAssessment.settlementStatus,
-      riskStatus: riskAssessment.riskStatus,
-    };
   }
 
   async initiateDonation(
@@ -656,8 +556,6 @@ export class TransactionReferenceService {
   async verifyPayment(payload: any, signature: string, rawBody?: Buffer) {
     const secret = process.env.PAYSTACK_SECRET_KEY;
 
-    console.log(payload, signature);
-
     if (!secret) {
       throw new InternalServerErrorException(
         'Paystack secret key not configured',
@@ -689,7 +587,6 @@ export class TransactionReferenceService {
 
     const reference = payload?.data?.reference;
     if (!reference) {
-      console.log(' bad request ');
       throw new BadRequestException('Missing Paystack reference');
     }
 
@@ -712,33 +609,30 @@ export class TransactionReferenceService {
     }
 
     if (transaction.status === TransactionStatusType.SUCCESS) {
-      return {
-        message: 'Payment already processed',
-      };
+      await this.prisma.providerWebhookEvent.updateMany({
+        where: { transactionReferenceId: transaction.id, processedAt: null },
+        data: { processedAt: new Date(), lastError: null },
+      });
+      return { message: 'Payment already processed' };
     }
-
-    if (transaction.status === TransactionStatusType.FAILED) {
-      throw new BadRequestException('Transaction already failed');
-    }
-
-    const providerAmount = Number(payload?.data?.amount || 0);
-    const normalizedAmount = this.resolveProviderAmountKobo(
-      transaction,
-      providerAmount,
-    );
 
     const paystackResponse =
       await this.paystackService.verifyTransaction(reference);
 
+    if (!paystackResponse.status || paystackResponse.data.status !== 'success')
+      throw new BadRequestException(
+        'Payment has not been confirmed by Paystack.',
+      );
     if (
-      !paystackResponse?.status ||
-      paystackResponse.data?.status !== 'success'
-    ) {
-      await this.markTransactionFailed(transaction.id, {
-        providerPayload: paystackResponse?.data || payload,
-      });
-      throw new BadRequestException('Payment verification failed');
-    }
+      transaction.paymentProvider !== PaymentProvider.PAYSTACK ||
+      paystackResponse.data.reference !== reference ||
+      paystackResponse.data.currency !== 'NGN' ||
+      !Number.isSafeInteger(paystackResponse.data.amount) ||
+      paystackResponse.data.amount <= 0
+    )
+      throw new BadRequestException(
+        'The verified payment does not match this checkout.',
+      );
 
     const eventKey = `paystack:${payload?.event || 'charge.success'}:${reference}`;
     if (
@@ -754,20 +648,16 @@ export class TransactionReferenceService {
       };
     }
 
-    const actualProviderFee = Number(
-      paystackResponse?.data?.fees || transaction.providerFee || 0,
+    return this.processWebhook(eventKey, () =>
+      this.completeCollectedTransaction({
+        transactionId: transaction.id,
+        amountKobo: paystackResponse.data.amount,
+        providerTransactionId: String(paystackResponse.data.id),
+        providerReference: paystackResponse.data.reference,
+        providerPayload: paystackResponse.data,
+        providerFeeKobo: paystackResponse.data.fees,
+      }),
     );
-
-    return this.completeCollectedTransaction({
-      transactionId: transaction.id,
-      amountKobo: normalizedAmount,
-      providerReference:
-        paystackResponse?.data?.reference ||
-        transaction.providerReference ||
-        reference,
-      providerPayload: paystackResponse?.data || payload,
-      providerFeeKobo: actualProviderFee,
-    });
   }
 
   async verifyAlatTransfer(
@@ -797,13 +687,6 @@ export class TransactionReferenceService {
         payload?.transactionStatus ||
         'SUCCESS',
     ).toUpperCase();
-    const providerAmount = Number(
-      payload?.amountSent ||
-        payload?.data?.amountSent ||
-        payload?.amount ||
-        payload?.data?.amount ||
-        0,
-    );
     const providerReference =
       payload?.transactionId ||
       payload?.data?.transactionId ||
@@ -838,9 +721,11 @@ export class TransactionReferenceService {
     }
 
     if (transaction.status === TransactionStatusType.SUCCESS) {
-      return {
-        message: 'Payment already processed',
-      };
+      await this.prisma.providerWebhookEvent.updateMany({
+        where: { transactionReferenceId: transaction.id, processedAt: null },
+        data: { processedAt: new Date(), lastError: null },
+      });
+      return { message: 'Payment already processed' };
     }
 
     const eventKey = `alat:${reference}:${status}:${providerReference || 'manual'}`;
@@ -857,25 +742,81 @@ export class TransactionReferenceService {
       };
     }
 
-    if (!['SUCCESS', 'PAID', 'COMPLETED'].includes(status)) {
-      await this.markTransactionFailed(transaction.id, {
-        providerReference,
-        providerPayload: payload,
-      });
-      throw new BadRequestException('ALAT transfer verification failed');
-    }
-
-    const normalizedAmount = this.resolveProviderAmountKobo(
-      transaction,
-      providerAmount,
+    const providerId = this.extractAlatProviderReference(transaction);
+    if (!providerId)
+      throw new BadRequestException('ALAT transaction is not initialized.');
+    const verified =
+      await this.alatCollectionService.getTransactionStatus(providerId);
+    if (
+      !this.isSuccessfulAlatStatus(String(verified.status).toUpperCase()) ||
+      verified.amountKobo === null ||
+      verified.amountKobo <= 0
+    )
+      throw new BadRequestException('ALAT has not confirmed this payment.');
+    if (verified.reference !== null && verified.reference !== transaction.id)
+      throw new BadRequestException(
+        'ALAT returned a different payment reference.',
+      );
+    const amountKobo = verified.amountKobo;
+    return this.processWebhook(eventKey, () =>
+      this.completeCollectedTransaction({
+        transactionId: transaction.id,
+        amountKobo,
+        providerReference: verified.providerReference,
+        providerPayload: verified.payload,
+        providerFeeKobo: verified.feeAmountKobo ?? transaction.providerFee,
+      }),
     );
+  }
 
-    return this.completeCollectedTransaction({
-      transactionId: transaction.id,
-      amountKobo: normalizedAmount,
-      providerReference: providerReference || transaction.providerReference,
-      providerPayload: payload,
-      providerFeeKobo: transaction.providerFee,
+  async cancelCheckout(id: string, userId: string) {
+    return this.checkout.format(await this.checkout.cancel(id, userId));
+  }
+
+  async refundQueue(opsKey?: string) {
+    this.assertOpsKey(opsKey);
+    return this.prisma.checkoutRefund.findMany({
+      where: { status: { not: 'REFUNDED' } },
+      include: {
+        transaction: {
+          select: {
+            paymentProvider: true,
+            providerReference: true,
+            userId: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+      take: 100,
+    });
+  }
+
+  async confirmManualRefund(id: string, reference: string, opsKey?: string) {
+    this.assertOpsKey(opsKey);
+    if (typeof reference !== 'string' || reference.trim().length < 3)
+      throw new BadRequestException(
+        'A confirmed provider refund reference is required.',
+      );
+    return this.prisma.$transaction(async (tx) => {
+      const refund = await tx.checkoutRefund.findUnique({
+        where: { transactionId: id },
+      });
+      if (!refund || refund.status !== 'MANUAL_REQUIRED')
+        throw new BadRequestException(
+          'This refund does not require manual confirmation.',
+        );
+      await tx.checkoutRefund.update({
+        where: { transactionId: id },
+        data: {
+          status: 'REFUNDED',
+          confirmedReference: reference.trim(),
+          confirmedAt: new Date(),
+        },
+      });
+      return tx.transactionReference.update({
+        where: { id },
+        data: { status: TransactionStatusType.REFUNDED },
+      });
     });
   }
 
@@ -1053,7 +994,7 @@ export class TransactionReferenceService {
     return this.buildRiskReviewResponse(updatedTransaction);
   }
 
-  async getTransactionStatus(id: string) {
+  async getTransactionStatus(id: string, userId: string) {
     let transaction = await this.prisma.transactionReference.findUnique({
       where: { id },
       include: {
@@ -1070,14 +1011,58 @@ export class TransactionReferenceService {
       throw new NotFoundException('Transaction not found');
     }
 
+    if (transaction.userId !== userId)
+      throw new NotFoundException('Transaction not found');
+    if (
+      transaction.paymentType !== PaymentType.DONATION &&
+      transaction.paymentProvider === PaymentProvider.PAYSTACK &&
+      (transaction.initializationStatus === 'READY' ||
+        transaction.providerReference !== null) &&
+      [
+        TransactionStatusType.PENDING,
+        TransactionStatusType.AWAITING_TRANSFER,
+        TransactionStatusType.EXPIRED,
+        TransactionStatusType.FAILED,
+      ].some((status) => status === transaction!.status)
+    ) {
+      const verified = await this.paystackService.verifyTransaction(id);
+      if (verified.status && verified.data.status === 'success') {
+        if (
+          verified.data.reference !== id ||
+          verified.data.currency !== 'NGN' ||
+          !Number.isSafeInteger(verified.data.amount) ||
+          verified.data.amount <= 0
+        )
+          throw new BadRequestException(
+            'The verified payment does not match this checkout.',
+          );
+        await this.completeCollectedTransaction({
+          transactionId: id,
+          amountKobo: verified.data.amount,
+          providerReference: verified.data.reference,
+          providerTransactionId: String(verified.data.id),
+          providerPayload: verified.data,
+          providerFeeKobo: verified.data.fees,
+        });
+        transaction = (await this.getTransactionWithEvent(id))!;
+      }
+    }
     if (this.shouldRefreshAlatTransactionStatus(transaction)) {
       transaction =
         (await this.refreshPendingAlatTransactionStatus(id)) || transaction;
     }
 
+    const checkout =
+      transaction.paymentType !== PaymentType.DONATION
+        ? await this.checkout.get(id)
+        : null;
     return {
+      ...(checkout ? this.checkout.format(checkout) : {}),
       id: transaction.id,
-      status: transaction.status,
+      status: checkout
+        ? this.checkout.format(checkout).checkoutStatus
+        : transaction.status,
+      refundStatus: checkout?.refund?.status ?? null,
       amount: transaction.amount,
       amountInNaira: transaction.amount / 100,
       chargedAmount: transaction.amount,
@@ -1118,7 +1103,16 @@ export class TransactionReferenceService {
   async getTicketOrRegistrationByTrasactionId(
     transactionId: string,
     type: string,
+    userId: string,
   ) {
+    const owned = await this.prisma.transactionReference.findFirst({
+      where: {
+        id: transactionId,
+        userId,
+        status: TransactionStatusType.SUCCESS,
+      },
+    });
+    if (!owned) throw new NotFoundException('Confirmed transaction not found');
     if (type === 'TICKETS' || type === 'TICKET') {
       const tickets = await this.prisma.ticket.findMany({
         where: { transactionId },
@@ -1203,6 +1197,7 @@ export class TransactionReferenceService {
     providerReference?: string | null;
     providerPayload?: any;
     providerFeeKobo: number;
+    providerTransactionId?: string;
   }) {
     const transaction = await this.prisma.transactionReference.findUnique({
       where: { id: input.transactionId },
@@ -1220,15 +1215,6 @@ export class TransactionReferenceService {
 
     if (!transaction) {
       throw new NotFoundException('Transaction not found');
-    }
-
-    if (
-      transaction.status !== TransactionStatusType.PENDING &&
-      transaction.status !== TransactionStatusType.AWAITING_TRANSFER
-    ) {
-      return {
-        message: 'Payment already processed',
-      };
     }
 
     const metadata = this.getMetadataObject(transaction.metadata);
@@ -1255,69 +1241,39 @@ export class TransactionReferenceService {
       transaction.riskStatus,
     );
 
-    let unavailableTickets: TicketAvailability[] = [];
-
-    if (paymentType === PaymentType.REGISTRATION) {
-      const sponsorship = metadata.sponsorship as
-        | RegistrationSponsorshipMetadata
-        | undefined;
-
-      if (sponsorship?.beneficiaryType === 'SPONSORED') {
-        await this.registrationService.recordSponsoredRegistration(
-          metadata.eventId,
-          transaction.userId,
-          transaction.id,
-          sponsorship.sponsorshipNote,
-        );
-
-        metadata.sponsorship = {
-          ...sponsorship,
-          status: 'PENDING_ASSIGNMENT',
-        };
-      } else {
-        await this.registrationService.createRegistration(
-          metadata.eventId,
-          transaction.userId,
-          transaction.id,
-        );
-      }
-    } else if (paymentType === PaymentType.DONATION) {
-      const donation = await this.donationService.createDonation(
-        {
-          eventId: metadata.eventId,
-          amount: baseAmountKobo,
-          message: metadata.message,
-          isAnonymous: metadata.isAnonymous,
-          transactionId: transaction.id,
-        },
-        transaction.userId,
-        transaction.user.username ?? transaction.user.fullName ?? 'Someone',
+    if (paymentType !== PaymentType.DONATION) {
+      return this.checkout.format(
+        await this.checkout.complete({
+          ...input,
+          providerPayload: this.asInputJson(input.providerPayload),
+          pricing: finalizedPricing,
+          settlementStatus,
+        }),
       );
-
-      metadata.donationId = donation.id;
-      metadata.donationCreated = true;
-    } else {
-      const ticketItems = [
-        ...(metadata.paidTickets || []),
-        ...(metadata.freeTickets || []),
-      ];
-
-      if (ticketItems.length === 0) {
-        throw new BadRequestException(
-          'No ticket payload found for transaction',
-        );
-      }
-
-      unavailableTickets =
-        (await this.ticketService.create(
-          transaction,
-          ticketItems,
-          metadata.eventId,
-          transaction.user.username ?? transaction.user.fullName ?? 'customer',
-        )) || [];
-
-      metadata.unavailableTickets = unavailableTickets;
     }
+    if (
+      transaction.status !== TransactionStatusType.PENDING &&
+      transaction.status !== TransactionStatusType.AWAITING_TRANSFER
+    ) {
+      return {
+        message: 'Payment already processed',
+      };
+    }
+
+    const unavailableTickets: TicketAvailability[] = [];
+    const donation = await this.donationService.createDonation(
+      {
+        eventId: metadata.eventId,
+        amount: baseAmountKobo,
+        message: metadata.message,
+        isAnonymous: metadata.isAnonymous,
+        transactionId: transaction.id,
+      },
+      transaction.userId,
+      transaction.user.username ?? transaction.user.fullName ?? 'Someone',
+    );
+    metadata.donationId = donation.id;
+    metadata.donationCreated = true;
 
     const updatedMetadata = {
       ...metadata,
@@ -1785,6 +1741,8 @@ export class TransactionReferenceService {
     const pendingStatuses: TransactionStatusType[] = [
       TransactionStatusType.PENDING,
       TransactionStatusType.AWAITING_TRANSFER,
+      TransactionStatusType.EXPIRED,
+      TransactionStatusType.FAILED,
     ];
 
     return (
@@ -1856,13 +1814,19 @@ export class TransactionReferenceService {
       }
 
       if (this.isSuccessfulAlatStatus(normalizedStatus)) {
-        const resolvedAmountKobo =
-          providerStatus.amountKobo && providerStatus.amountKobo > 0
-            ? this.resolveProviderAmountKobo(
-                transaction,
-                providerStatus.amountKobo,
-              )
-            : transaction.amount;
+        if (
+          providerStatus.amountKobo === null ||
+          providerStatus.amountKobo <= 0
+        )
+          throw new BadRequestException('ALAT returned no collected amount.');
+        if (
+          providerStatus.reference !== null &&
+          providerStatus.reference !== transaction.id
+        )
+          throw new BadRequestException(
+            'ALAT returned a different payment reference.',
+          );
+        const resolvedAmountKobo = providerStatus.amountKobo;
 
         await this.completeCollectedTransaction({
           transactionId: transaction.id,
@@ -1871,10 +1835,9 @@ export class TransactionReferenceService {
             providerStatus.providerReference || transaction.providerReference,
           providerPayload: providerStatus.payload,
           providerFeeKobo:
-            providerStatus.feeAmountKobo && providerStatus.feeAmountKobo > 0
-              ? providerStatus.feeAmountKobo
-              : transaction.providerFee,
+            providerStatus.feeAmountKobo ?? transaction.providerFee,
         });
+        await this.markWebhookProcessed(eventKey);
       } else if (this.isFailedAlatStatus(normalizedStatus)) {
         await this.markTransactionFailed(transaction.id, {
           providerReference:
@@ -1951,25 +1914,44 @@ export class TransactionReferenceService {
     transactionReferenceId: string,
     payload: any,
   ) {
+    const event = await this.prisma.providerWebhookEvent.upsert({
+      where: { eventKey },
+      create: {
+        provider,
+        eventKey,
+        transactionReferenceId,
+        payload,
+        attempts: 1,
+      },
+      update: { attempts: { increment: 1 } },
+    });
+    return event.processedAt === null;
+  }
+
+  private async processWebhook<T>(
+    eventKey: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
     try {
-      await this.prisma.providerWebhookEvent.create({
+      const result = await operation();
+      await this.markWebhookProcessed(eventKey);
+      return result;
+    } catch (error) {
+      await this.prisma.providerWebhookEvent.update({
+        where: { eventKey },
         data: {
-          provider,
-          eventKey,
-          transactionReferenceId,
-          payload,
+          lastError: error instanceof Error ? error.message : String(error),
         },
       });
-      return true;
-    } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
-      ) {
-        return false;
-      }
       throw error;
     }
+  }
+
+  private async markWebhookProcessed(eventKey: string) {
+    await this.prisma.providerWebhookEvent.update({
+      where: { eventKey },
+      data: { processedAt: new Date(), lastError: null },
+    });
   }
 
   private async markTransactionFailed(
@@ -1979,14 +1961,29 @@ export class TransactionReferenceService {
       providerPayload?: any;
     },
   ) {
-    await this.prisma.transactionReference.update({
-      where: { id: transactionId },
-      data: {
-        status: TransactionStatusType.FAILED,
-        settlementStatus: SettlementStatus.FAILED,
-        providerReference: input.providerReference,
-        providerPayload: input.providerPayload,
-      },
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.transactionReference.updateMany({
+        where: {
+          id: transactionId,
+          status: {
+            in: [
+              TransactionStatusType.PENDING,
+              TransactionStatusType.AWAITING_TRANSFER,
+            ],
+          },
+        },
+        data: {
+          status: TransactionStatusType.FAILED,
+          settlementStatus: SettlementStatus.FAILED,
+          providerReference: input.providerReference,
+          providerPayload: input.providerPayload,
+        },
+      });
+      if (updated.count === 1)
+        await tx.checkoutReservation.updateMany({
+          where: { transactionId, status: 'HELD' },
+          data: { status: 'EXPIRED' },
+        });
     });
   }
 

@@ -42,6 +42,7 @@ describe('EventService', () => {
       thumbnailUrl: null,
     };
     const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'event-1' }]),
       event: {
         update: jest.fn().mockResolvedValue({
           ...existingEvent,
@@ -76,6 +77,7 @@ describe('EventService', () => {
   it('normalizes event links on create and update', async () => {
     const createdEvent = { id: 'event-2' };
     const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'event-1' }]),
       event: {
         create: jest.fn().mockResolvedValue(createdEvent),
         update: jest.fn().mockResolvedValue(createdEvent),

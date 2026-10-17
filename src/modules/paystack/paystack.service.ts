@@ -4,6 +4,9 @@ import {
   PaystackBanksResponse,
   PaystackResolveAccountResponse,
   PaystackResponse,
+  PaystackResult,
+  PaystackVerifiedTransaction,
+  PaystackRefund,
 } from './types/paystack-response.type';
 
 @Injectable()
@@ -32,16 +35,55 @@ export class PaystackService {
     return res.data;
   }
 
-  async verifyTransaction(reference: string): Promise<PaystackResponse> {
+  async verifyTransaction(
+    reference: string,
+  ): Promise<PaystackResult<PaystackVerifiedTransaction>> {
     const res = await axios.get(
       `${this.paystackBaseUrl}/transaction/verify/${reference}`,
       {
+        timeout: 10000,
         headers: {
           Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
         },
       },
     );
     return res.data;
+  }
+
+  async createRefund(
+    reference: string,
+    amount: number,
+  ): Promise<PaystackResult<PaystackRefund>> {
+    const response = await axios.post<PaystackResult<PaystackRefund>>(
+      `${this.paystackBaseUrl}/refund`,
+      {
+        transaction: reference,
+        amount,
+        currency: 'NGN',
+        merchant_note: 'GatherGo checkout capacity unavailable',
+      },
+      {
+        timeout: 20000,
+        headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
+      },
+    );
+    if (!response.data.status) throw new Error(response.data.message);
+    return response.data;
+  }
+
+  async listRefunds(
+    providerTransactionId: string,
+  ): Promise<PaystackResult<PaystackRefund[]>> {
+    const response = await axios.get<PaystackResult<PaystackRefund[]>>(
+      `${this.paystackBaseUrl}/refund`,
+      {
+        params: { transaction: providerTransactionId, perPage: 100 },
+        timeout: 20000,
+        headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
+      },
+    );
+    if (!response.data.status) throw new Error(response.data.message);
+    return response.data;
   }
 
   async listBanks(country = 'nigeria'): Promise<PaystackBanksResponse> {

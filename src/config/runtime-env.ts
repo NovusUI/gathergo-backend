@@ -6,8 +6,7 @@ const DEFAULT_REDIS_HOST = '127.0.0.1';
 const DEFAULT_REDIS_PORT = 6379;
 const DEFAULT_REDIS_DB = 0;
 const DEFAULT_JWT_SECRET = 'local-dev-jwt-secret-change-me';
-const DEFAULT_JWT_REFRESH_SECRET =
-  'local-dev-jwt-refresh-secret-change-me';
+const DEFAULT_JWT_REFRESH_SECRET = 'local-dev-jwt-refresh-secret-change-me';
 const DEFAULT_JWT_EXPIRES_IN = '15m';
 const DEFAULT_JWT_REFRESH_EXPIRES_IN = '7d';
 
@@ -113,7 +112,9 @@ export function getJwtRefreshSecret(): string {
 }
 
 export function getJwtExpiresIn(): string {
-  return normalizeEnvValue(process.env.JWT_EXPIRES_IN) || DEFAULT_JWT_EXPIRES_IN;
+  return (
+    normalizeEnvValue(process.env.JWT_EXPIRES_IN) || DEFAULT_JWT_EXPIRES_IN
+  );
 }
 
 export function getJwtRefreshExpiresIn(): string {
@@ -124,12 +125,16 @@ export function getJwtRefreshExpiresIn(): string {
 }
 
 export function getGoogleCallbackUrl(): string {
-  const explicitCallbackUrl = normalizeEnvValue(process.env.GOOGLE_CALLBACK_URL);
+  const explicitCallbackUrl = normalizeEnvValue(
+    process.env.GOOGLE_CALLBACK_URL,
+  );
   if (explicitCallbackUrl) {
     return explicitCallbackUrl;
   }
 
-  const renderHostname = normalizeEnvValue(process.env.RENDER_EXTERNAL_HOSTNAME);
+  const renderHostname = normalizeEnvValue(
+    process.env.RENDER_EXTERNAL_HOSTNAME,
+  );
   if (renderHostname) {
     return `https://${renderHostname}/api/v1/auth/google/redirect`;
   }
@@ -209,6 +214,8 @@ export function validateEnvironment(config: Record<string, unknown>) {
       .default('development'),
     PORT: Joi.number().port().default(DEFAULT_PORT),
     DATABASE_URL: Joi.string().required(),
+    CHECKOUT_HOLD_SECONDS: Joi.number().integer().min(60).max(600).default(300),
+    CHECKOUT_MAX_TICKETS: Joi.number().integer().min(1).max(100).default(4),
     SHADOW_DATABASE_URL: Joi.string().allow('').optional(),
     FRONTEND_URL: Joi.string().allow('').optional(),
     CORS_ALLOWED_ORIGINS: Joi.string().allow('').optional(),

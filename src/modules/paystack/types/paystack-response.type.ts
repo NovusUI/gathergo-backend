@@ -37,3 +37,19 @@ export type PaystackResolveAccountResponse = {
   message: string;
   data: PaystackResolvedAccount;
 };
+
+export type PaystackVerifiedTransaction = {
+  id: number;
+  reference: string;
+  status: string;
+  amount: number;
+  currency: string;
+  fees: number;
+};
+export type PaystackRefund = {
+  id: number;
+  status: string;
+  amount: number;
+  currency: string;
+};
+export type PaystackResult<T> = Omit<PaystackResponse, 'data'> & { data: T };

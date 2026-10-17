@@ -141,3 +141,20 @@ Nest is an MIT-licensed open source project. It can grow thanks to the sponsors 
 ## License
 
 Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+
+
+### Ticket and registration checkout safety
+
+Paid checkouts reserve capacity for `CHECKOUT_HOLD_SECONDS` (default 300 seconds), with `CHECKOUT_MAX_TICKETS` (default 4) per ticket order and one active checkout per buyer/event. Free orders confirm immediately. Expired holds stop consuming capacity immediately, independent of the cleanup worker. Ticket capacity and registration capacity edits cannot undercut booked/reserved spaces.
+
+`POST /transaction-reference/initiate` and `/initiateReg` require a UUID v4 `Idempotency-Key` header. Reuse it for retries of the same order; a changed order with the same key returns 409. Ticket quantities are aggregated by ticket type and the complete order succeeds or fails together. URLs and transfer instructions are persisted for checkout recovery. Refreshing or reopening checkout never extends its deadline.
+
+`GET /transaction-reference/status/:id`, `GET /transaction-reference/ticketorreg/:id`, and `POST /transaction-reference/:id/cancel` are buyer-owned endpoints. Status returns `serverTime`, `reservationExpiresAt`, `initializationStatus`, `paymentUrl`, and `checkoutStatus` for ticket/registration payments. An expired hold can still receive payment: provider-verified payments claim available capacity atomically or become `REFUND_REQUIRED`, with no creator payout. Cancelled checkouts always refund later payments. Only confirmed admissions produce `SUCCESS`.
+
+The scheduled checkout worker retries confirmation delivery and refunds. Admissions, sold counts, payment state, and the confirmation job commit together. Email queue jobs have deterministic IDs; feed/notification delivery remains at least once. Webhook inbox records are marked processed only after fulfillment commits and remain retryable on failure.
+
+Paystack refunds are submitted once, then reconciled against its documented refund API. An ambiguous timeout requires reconciliation or an operator; it never triggers another automatic refund POST. ALAT refunds require operations handling because no verified refund API is integrated. With `x-ops-key: INTERNAL_OPS_KEY`, list outstanding refunds at `GET /transaction-reference/internal/refunds`. Refund through the provider first, then confirm a `MANUAL_REQUIRED` refund at `POST /transaction-reference/internal/:id/refund-confirmation` with `{ "reference": "actual-provider-refund-reference" }`. `REFUNDED` means provider completion was confirmed, rather than merely queued.
+
+Roll out migration `20261017120000_checkout_reservations`, regenerate Prisma, and deploy backend/mobile together (older clients do not send checkout keys). The migration preserves historical admissions, assigns fulfillment identities, reconciles sold counts, and counts existing sponsored seats. Historical duplicates and oversold events require manual review; it does not delete admissions or raise event capacity. No live migration is performed by the checkout tests.
+
+Concurrency tests require a separate local PostgreSQL database with PostGIS and this schema, named `checkout_hardening...`. Run `CHECKOUT_TEST_DATABASE_URL=postgresql://...@127.0.0.1:5432/checkout_hardening npm test -- --runInBand --runTestsByPath src/modules/checkout/checkout.integration.spec.ts`. Provider calls and confirmation services are mocked; inventory, locks, rollbacks, webhook inbox, and refund state use real PostgreSQL. Migration preservation fixtures are in `test/fixtures/checkout-migration` (seed the pre-migration schema, apply the migration, run assertions).

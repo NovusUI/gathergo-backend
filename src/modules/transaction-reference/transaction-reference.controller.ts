@@ -46,8 +46,14 @@ export class TransactionReferenceController {
     @CurrentUser('id') userId: string,
     @CurrentUser('email') email: string,
     @Body() dto: CreateTransactionReferenceDto,
+    @Headers('idempotency-key') idempotencyKey: string,
   ) {
-    return this.transactionReferenceService.initiate(userId, email, dto);
+    return this.transactionReferenceService.initiate(
+      userId,
+      email,
+      dto,
+      idempotencyKey,
+    );
   }
 
   @Post('initiateReg')
@@ -56,6 +62,7 @@ export class TransactionReferenceController {
     @CurrentUser('id') userId: string,
     @CurrentUser('email') email: string,
     @Query('eventid') reference: string,
+    @Headers('idempotency-key') idempotencyKey: string,
     @Query('beneficiaryType') beneficiaryType?: string,
     @Query('sponsorshipNote') sponsorshipNote?: string,
     @Query('provider') provider?: PaymentProviderDto,
@@ -66,6 +73,7 @@ export class TransactionReferenceController {
       userId,
       email,
       reference,
+      idempotencyKey,
       {
         beneficiaryType,
         sponsorshipNote,
@@ -136,7 +144,10 @@ export class TransactionReferenceController {
     @Query() dto: RiskReviewQueueQueryDto,
   ) {
     return {
-      data: await this.transactionReferenceService.getRiskReviewQueue(dto, opsKey),
+      data: await this.transactionReferenceService.getRiskReviewQueue(
+        dto,
+        opsKey,
+      ),
     };
   }
 
@@ -156,6 +167,31 @@ export class TransactionReferenceController {
     );
   }
 
+  @Post(':id/cancel')
+  cancelCheckout(@Param('id') id: string, @CurrentUser('id') userId: string) {
+    return this.transactionReferenceService.cancelCheckout(id, userId);
+  }
+
+  @Get('internal/refunds')
+  @Public()
+  refundQueue(@Headers('x-ops-key') opsKey: string) {
+    return this.transactionReferenceService.refundQueue(opsKey);
+  }
+
+  @Post('internal/:id/refund-confirmation')
+  @Public()
+  confirmRefund(
+    @Param('id') id: string,
+    @Headers('x-ops-key') opsKey: string,
+    @Body('reference') reference: string,
+  ) {
+    return this.transactionReferenceService.confirmManualRefund(
+      id,
+      reference,
+      opsKey,
+    );
+  }
+
   @Get('status/:id')
   @ApiOperation({ summary: 'Get transaction status by ID' })
   @ApiParam({ name: 'id', description: 'Transaction Reference ID' })
@@ -163,8 +199,11 @@ export class TransactionReferenceController {
     status: 200,
     description: 'Transaction status returned successfully',
   })
-  async getTransactionStatus(@Param('id') id: string) {
-    return this.transactionReferenceService.getTransactionStatus(id);
+  async getTransactionStatus(
+    @Param('id') id: string,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.transactionReferenceService.getTransactionStatus(id, userId);
   }
 
   @Get('ticketorreg/:id')
@@ -177,10 +216,12 @@ export class TransactionReferenceController {
   async getTicketOrRegByTreansactionId(
     @Param('id') id: string,
     @Query('type') type: 'REGISTRATION' | 'TICKET',
+    @CurrentUser('id') userId: string,
   ) {
     return this.transactionReferenceService.getTicketOrRegistrationByTrasactionId(
       id,
       type,
+      userId,
     );
   }
 }

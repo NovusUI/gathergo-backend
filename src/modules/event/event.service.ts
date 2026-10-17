@@ -1,4 +1,9 @@
 import {
+  assertRegistrationCapacityEdit,
+  assertTicketCapacityEdit,
+  lockCheckoutEvent,
+} from '../checkout/checkout-inventory';
+import {
   BadRequestException,
   Injectable,
   NotFoundException,
@@ -199,6 +204,13 @@ export class EventService {
           : [];
 
       const result = await this.prisma.$transaction(async (tx) => {
+        await lockCheckoutEvent(tx, id);
+        if (typeof dto.registrationAttendees === 'number')
+          await assertRegistrationCapacityEdit(
+            tx,
+            id,
+            dto.registrationAttendees,
+          );
         const eventUpdateData: Prisma.EventUncheckedUpdateInput = {
           title: dto.title ?? undefined,
           description: dto.description ?? undefined,
@@ -266,6 +278,10 @@ export class EventService {
               where: { id: ticket.id },
             });
             if (existingTicket) {
+              if (existingTicket.eventId !== id)
+                throw new ForbiddenException(
+                  'Ticket does not belong to this event',
+                );
               // Update non-quantity fields via Prisma
               await tx.eventTicket.update({
                 where: { id: ticket.id },
@@ -280,6 +296,11 @@ export class EventService {
 
               // Atomically set: quantity = sold + requested_remaining
               if (typeof ticket.quantity === 'number') {
+                await assertTicketCapacityEdit(
+                  tx,
+                  existingTicket.id,
+                  ticket.quantity,
+                );
                 await tx.$executeRaw`
                   UPDATE "EventTicket"
                   SET "quantity" = "sold" + ${ticket.quantity}
@@ -626,6 +647,8 @@ export class EventService {
             ? 'ALAT transfer is not available for this event yet'
             : null,
         pricingConfig: getCheckoutPricingConfig({ availableProviders }),
+        maxTicketsPerCheckout: Number(process.env.CHECKOUT_MAX_TICKETS || 4),
+        reservationSeconds: Number(process.env.CHECKOUT_HOLD_SECONDS || 300),
       },
     };
   }
