@@ -4,6 +4,7 @@ import {
 } from '../checkout/checkout-inventory';
 import {
   ForbiddenException,
+  BadRequestException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -31,6 +32,12 @@ export class EventTicketService {
     if (event.creatorId !== userId) {
       throw new ForbiddenException(
         'You are not allowed to add tickets to this event',
+      );
+    }
+
+    if (event.registrationType !== 'ticket') {
+      throw new BadRequestException(
+        'Tickets are only available for ticketed events',
       );
     }
 

@@ -6,7 +6,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError, AxiosHeaders, AxiosResponse } from 'axios';
 import { ImpactService } from './impact.service';
-import { AiImpactSuggestionData, DeepSeekChatCompletion } from './impact.types';
+import type { DeepSeekChatCompletion } from './deepseek.types';
+import { AiImpactSuggestionData } from './impact.types';
 
 let post: jest.SpyInstance<
   ReturnType<typeof axios.post>,

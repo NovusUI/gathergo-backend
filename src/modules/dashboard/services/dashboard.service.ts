@@ -3,6 +3,16 @@ import { PaymentType, Prisma, TransactionStatusType } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { formatPayment } from 'src/utils';
 import { InternalAdminOverviewQueryDto } from '../dto/internal-overview.dto';
+import { impactEventWhere } from '../../event/event-impact.util';
+import {
+  summarizeVolunteering,
+  volunteerEventMetrics,
+  volunteerSummaryInclude,
+} from '../../volunteer/volunteer.util';
+import {
+  eventDashboardInclude,
+  EventDashboardData,
+} from '../event-dashboard.types';
 
 const homeCardEventSelect = {
   id: true,
@@ -70,7 +80,7 @@ export class DashboardService {
       }),
       this.prisma.event.count({
         where: {
-          registrationType: 'donation',
+          donationsEnabled: true,
         },
       }),
       this.prisma.event.count({
@@ -131,6 +141,7 @@ export class DashboardService {
           id: true,
           title: true,
           registrationType: true,
+          ...volunteerSummaryInclude,
           location: true,
           startDate: true,
           endDate: true,
@@ -155,6 +166,7 @@ export class DashboardService {
           donations: {
             select: {
               amount: true,
+              status: true,
             },
           },
           Registration: {
@@ -245,9 +257,21 @@ export class DashboardService {
           ),
         },
       ],
-      upcomingEvents: upcomingEvents.map((event) =>
-        this.formatInternalOverviewEvent(event, now),
-      ),
+      upcomingEvents: upcomingEvents.map((event) => {
+        const formatted = this.formatInternalOverviewEvent(event, now);
+        if (event.registrationType === 'volunteer') {
+          const metrics = volunteerEventMetrics(event);
+          return {
+            ...formatted,
+            volunteering: metrics.volunteering,
+            participants: metrics.participants,
+            grossAmount: metrics.raised,
+            goalAmount: metrics.goal,
+            progress: metrics.progress,
+          };
+        }
+        return { ...formatted, volunteering: summarizeVolunteering(event) };
+      }),
       recentActivity: recentActivity.map((transaction) =>
         this.formatInternalActivity(transaction),
       ),
@@ -267,11 +291,7 @@ export class DashboardService {
       this.prisma.event.findFirst({
         where: {
           endDate: { gte: now },
-          OR: [
-            { impactTitle: { not: null } },
-            { impactDescription: { not: null } },
-            { registrationType: 'donation' },
-          ],
+          ...impactEventWhere,
         },
         orderBy: { startDate: 'asc' },
         select: homeCardEventSelect,
@@ -418,25 +438,7 @@ export class DashboardService {
         creatorId: userId, // Only events user CREATED/OWNS
         ...dateFilter,
       },
-      include: {
-        eventTickets: {
-          select: {
-            sold: true,
-            quantity: true,
-            price: true,
-          },
-        },
-        donations: {
-          select: {
-            amount: true,
-          },
-        },
-        Registration: {
-          select: {
-            id: true,
-          },
-        },
-      },
+      include: eventDashboardInclude,
       orderBy: dateFilter.endDate?.gte
         ? { startDate: 'asc' }
         : { endDate: 'desc' },
@@ -465,7 +467,10 @@ export class DashboardService {
     });
   }
 
-  private formatEventForDashboard(event: any, type: 'upcoming' | 'past') {
+  private formatEventForDashboard(
+    event: EventDashboardData,
+    type: 'upcoming' | 'past',
+  ) {
     let raised = 0;
     let participants = 0;
     let goal = 0;
@@ -505,21 +510,28 @@ export class DashboardService {
     }
 
     const progress = goal > 0 ? Math.min((raised / goal) * 100, 100) : 0;
+    const metrics =
+      event.registrationType === 'volunteer'
+        ? volunteerEventMetrics(event)
+        : {
+            progress: Math.round(progress),
+            participants,
+            raised,
+            goal,
+            volunteering: summarizeVolunteering(event),
+          };
 
     return {
       id: event.id,
       title: event.title,
       description: event.description || '',
-      progress: Math.round(progress),
-      participants,
-      raised,
-      goal,
       date: event.startDate.toLocaleDateString('en-US', {
         month: 'short',
         day: 'numeric',
         year: 'numeric',
       }),
       type,
+      ...metrics,
     };
   }
 

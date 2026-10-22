@@ -76,6 +76,10 @@ repeated string values or a JSON-encoded array, including `[]` to clear interest
 Home cards feature general events first, with a separate impact spotlight when
 available. Existing event records are preserved until their organiser edits them.
 
+`GogoModule` in `src/modules/gogo` owns the AI features: event-creation
+conversations, impact-map suggestions, and their shared DeepSeek request code
+and provider types. `AppModule` registers it independently of `EventModule`.
+
 Impact suggestions use DeepSeek through the authenticated
 `POST /api/v1/impact/suggestions` endpoint. Set `DEEPSEEK_API_KEY` on the backend
 only. `DEEPSEEK_MODEL` defaults to `deepseek-flash` and also supports
@@ -88,6 +92,77 @@ There is no keyword fallback: missing credentials, provider failures, and invali
 model responses report errors while the organiser can still publish without a
 map. Only organiser-selected suggestions are saved. Requests are limited to 30
 per minute per IP using the existing rate-limit guard.
+
+Gogo event creation uses `POST /api/v1/events/creation-assistant` with the same
+server-only DeepSeek configuration. Authenticated requests include `eventType`
+(`general` or `donation`), the organiser's IANA `timeZone`, up to 20 recent
+`messages` (`user` or `assistant`), and the current partial `draft` with
+`ticketCount` and `volunteerRoleCount`. The response envelope's `data` contains
+`reply`, up to three quick-reply `choices`, a nullable `section` naming the
+one relevant app editor or `Review`, and partial field `updates`. The app presents one
+question at a time and continues after the organiser finishes that editor. Dates
+include a time-zone offset; fees remain in naira and donation targets in kobo.
+The endpoint validates generated changes and volunteering eligibility; it never
+creates or publishes an event. Ticket tiers, roles, images and impact maps use
+the existing app editors. Users can switch to the manual form with the same
+draft and must review and publish there. Deploy this endpoint before releasing
+the conversational UI. Provider errors offer retry or the manual form rather
+than a simulated conversation. Requests are limited to 20 per minute per IP.
+
+## Event volunteering
+
+Physical events can use `registrationType: "volunteer"` with at least one
+`volunteerRoles` entry, without tickets, attendee registration, fees, or donations.
+Each role has `title`, `description`, `capacity`, and `requiresApproval` (default
+`true`). Multipart event creation accepts `volunteerRoles` as a JSON array.
+
+Every event must have non-empty `impactDescription` story text before it can
+recruit volunteers, including volunteer-only events and fundraisers. An impact
+title alone does not qualify. Online events cannot recruit volunteers. An event
+with volunteer roles must retain its physical location and impact story.
+
+`donationsEnabled` enables optional fundraising independently of participation.
+It defaults to `false` for new events except donation events, which always accept
+donations. A donation target is optional for other event types and uses kobo.
+Volunteer participation never requires payment or an attendee registration.
+Existing ticket and registration checkout remains separate.
+
+All routes below use the `/api/v1` prefix and require authentication:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /events/:eventId/volunteer-roles` | Roles, confirmed place counts, and the caller's applications |
+| `POST /events/:eventId/volunteer-roles` | Organiser creates a role |
+| `PATCH /events/:eventId/volunteer-roles/:roleId` | Organiser changes details, capacity, approval policy, or `isOpen` |
+| `POST /events/:eventId/volunteer-roles/:roleId/apply` | Apply with an optional `note`; accept immediately if approval is disabled |
+| `GET /events/:eventId/volunteers` | Organiser-only roster |
+| `PATCH /events/:eventId/volunteers/:id/review` | Organiser sets `status` to `ACCEPTED` or `DECLINED` |
+| `PATCH /events/:eventId/volunteers/:id/withdraw` | Applicant withdraws |
+| `PATCH /events/:eventId/volunteers/:id/check-in` | Organiser records attendance during the event |
+| `PATCH /events/:eventId/volunteers/:id/complete` | Organiser confirms actual `confirmedMinutes` after the event |
+| `GET /events/:eventId/volunteers/summary` | Recruitment, attendance, and confirmed contribution totals |
+| `GET /volunteers/me` | Personal application and contribution history |
+
+Recruitment closes when the event starts. Each person can hold one volunteer role
+per event; after withdrawal or rejection they can apply again before recruitment
+closes. Capacity allocation is serialized with event edits. Pending applications
+do not reserve places. Changing the approval policy affects new applications;
+pending applications still require review. Confirmed hours count completed work
+only and cannot exceed the time from check-in to event end. Close recruitment
+with `isOpen: false` to retain application history.
+
+Organiser dashboards expose a separate `volunteering` summary for all events.
+For volunteer-only events, `participants` counts confirmed places; money raised
+and monetary goals remain separate from `volunteering.recruitmentProgress`.
+
+Apply migration `20261019120000_event_volunteering` and regenerate Prisma before
+deploying. The migration enables donations for existing donation events. Mobile
+creation, application, roster, and attendance controls use these endpoints;
+remote and community volunteering are outside this version.
+
+The volunteering integration suite requires an isolated local PostgreSQL database
+whose name contains `volunteer_test`, with the migrations applied. Run
+`VOLUNTEER_TEST_DATABASE_URL=postgresql://...@127.0.0.1:5432/gathergo_volunteer_test npm test -- --runInBand --runTestsByPath src/modules/volunteer/volunteer.integration.spec.ts`.
 
 ## Run tests
 

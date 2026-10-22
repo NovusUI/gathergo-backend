@@ -34,6 +34,7 @@ describe('EventService', () => {
       id: 'event-1',
       creatorId: 'user-1',
       registrationType: RegistrationType.registration,
+      donationsEnabled: false,
       registrationFee: 5000,
       registrationAttendees: 150,
       reoccurring: Reoccurring.NONE,
@@ -44,6 +45,10 @@ describe('EventService', () => {
     const tx = {
       $queryRaw: jest.fn().mockResolvedValue([{ id: 'event-1' }]),
       event: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          ...existingEvent,
+          _count: { volunteerRoles: 0 },
+        }),
         update: jest.fn().mockResolvedValue({
           ...existingEvent,
           title: 'Updated title',
@@ -79,6 +84,10 @@ describe('EventService', () => {
     const tx = {
       $queryRaw: jest.fn().mockResolvedValue([{ id: 'event-1' }]),
       event: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          donationsEnabled: true,
+          _count: { volunteerRoles: 0 },
+        }),
         create: jest.fn().mockResolvedValue(createdEvent),
         update: jest.fn().mockResolvedValue(createdEvent),
       },

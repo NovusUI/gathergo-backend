@@ -4,16 +4,14 @@ import {
   Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { requestDeepSeekJson } from './deepseek-json';
+import type { DeepSeekChatCompletion } from './deepseek.types';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import * as Joi from 'joi';
 import { ImpactSuggestionDto } from './dto/impact-suggestion.dto';
 import { IMPACT_PATHS, SDG_GOALS } from './impact.catalog';
-import {
-  AiImpactSuggestionData,
-  DeepSeekChatCompletion,
-  ImpactSuggestionData,
-} from './impact.types';
+import { AiImpactSuggestionData, ImpactSuggestionData } from './impact.types';
 
 const INVALID_RESPONSE_MESSAGE =
   'AI impact suggestions could not be read. Please try again.';
@@ -106,32 +104,13 @@ export class ImpactService {
 
     let completion: DeepSeekChatCompletion;
     try {
-      const response = await axios.post<DeepSeekChatCompletion>(
-        'https://api.deepseek.com/chat/completions',
-        {
-          model: this.configService.get<string>(
-            'DEEPSEEK_MODEL',
-            'deepseek-flash',
-          ),
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: JSON.stringify(dto) },
-          ],
-          thinking: { type: 'disabled' },
-          response_format: { type: 'json_object' },
-          max_tokens: 1600,
-          temperature: 0.2,
-          stream: false,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: this.configService.get<number>('DEEPSEEK_TIMEOUT_MS', 30000),
-        },
+      completion = await requestDeepSeekJson(
+        this.configService,
+        apiKey,
+        SYSTEM_PROMPT,
+        JSON.stringify(dto),
+        1600,
       );
-      completion = response.data;
     } catch (error) {
       // Do not log the Axios error object: it contains the API key and draft.
       const reason = axios.isAxiosError(error)

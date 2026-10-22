@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
+import { RegistrationType } from '@prisma/client';
 
 export class ImpactSuggestionDto {
   @ApiPropertyOptional()
@@ -20,8 +21,8 @@ export class ImpactSuggestionDto {
   @MaxLength(600)
   impactDescription?: string;
 
-  @ApiPropertyOptional({ enum: ['ticket', 'registration', 'donation'] })
+  @ApiPropertyOptional({ enum: RegistrationType })
   @IsOptional()
-  @IsIn(['ticket', 'registration', 'donation'])
-  registrationType?: 'ticket' | 'registration' | 'donation';
+  @IsEnum(RegistrationType)
+  registrationType?: RegistrationType;
 }

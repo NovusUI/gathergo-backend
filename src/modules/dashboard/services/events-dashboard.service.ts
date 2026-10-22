@@ -1,6 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { formatPayment } from 'src/utils';
+import {
+  summarizeVolunteering,
+  volunteerEventMetrics,
+  volunteerSummaryInclude,
+} from '../../volunteer/volunteer.util';
 
 @Injectable()
 export class EventsDashboardService {
@@ -22,7 +27,16 @@ export class EventsDashboardService {
     }
 
     // Format event based on type
-    const formattedEvent = this.formatEventData(event);
+    const formattedEvent = {
+      ...this.formatEventData(event),
+      ...(event.registrationType === 'volunteer'
+        ? {
+            type: 'volunteer',
+            donationsEnabled: event.donationsEnabled,
+            ...volunteerEventMetrics(event),
+          }
+        : { volunteering: summarizeVolunteering(event) }),
+    };
 
     const payments = await this.getUserPayments(eventId, 0, limit);
 
@@ -73,6 +87,7 @@ export class EventsDashboardService {
     return this.prisma.event.findUnique({
       where: { id: eventId, creatorId: userId },
       include: {
+        ...volunteerSummaryInclude,
         eventTickets: {
           where: { isVisible: true },
           include: {

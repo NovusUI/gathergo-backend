@@ -1,6 +1,6 @@
 export type ImpactSuggestionConfidence = 'high' | 'medium' | 'low';
 export type ImpactSuggestionSource = 'ai';
-export type ImpactRegistrationType = 'ticket' | 'registration' | 'donation';
+export type { RegistrationType as ImpactRegistrationType } from '@prisma/client';
 
 export interface SuggestedSdgGoal {
   id: string;
@@ -51,15 +51,3 @@ export type AiImpactSuggestionData = {
     evidence: string;
   })[];
 };
-
-export interface DeepSeekChatCompletion {
-  choices: {
-    finish_reason:
-      | 'stop'
-      | 'length'
-      | 'content_filter'
-      | 'tool_calls'
-      | 'insufficient_system_resource';
-    message: { content: string | null };
-  }[];
-}

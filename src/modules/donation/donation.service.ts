@@ -41,10 +41,7 @@ export class DonationService {
       throw new NotFoundException('Event not found');
     }
 
-    // Verify event is donation type
-    if (event.registrationType !== 'donation') {
-      throw new BadRequestException('Event is not a donation event');
-    }
+    // Eligibility is checked at checkout; a verified payment still settles if recruitment or donations later close.
 
     // Note: The DTO validates the minimum amount in naira before payment
     // But we can double-check here for safety

@@ -36,7 +36,8 @@ import { ScannerModule } from './modules/scanner/scanner.modules';
 import { RateLimitGuard } from './common/guards/rate-limit.guard';
 import { WalletModule } from './modules/wallet/wallet.module';
 import { validateEnvironment } from './config/runtime-env';
-import { ImpactModule } from './modules/impact/impact.module';
+import { GogoModule } from './modules/gogo/gogo.module';
+import { VolunteerModule } from './modules/volunteer/volunteer.module';
 
 @Module({
   imports: [
@@ -77,7 +78,8 @@ import { ImpactModule } from './modules/impact/impact.module';
     RegistrationModule,
     ScannerModule,
     WalletModule,
-    ImpactModule,
+    GogoModule,
+    VolunteerModule,
   ],
   controllers: [AppController],
   providers: [AppService, PrismaService, RateLimitGuard],

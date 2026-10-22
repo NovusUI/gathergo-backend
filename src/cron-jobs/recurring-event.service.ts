@@ -16,6 +16,7 @@ export class RecurringEventService {
         reoccurring: { not: 'NONE' },
         endDate: { lte: now },
       },
+      include: { volunteerRoles: true },
     });
 
     for (const event of recurringEvents) {
@@ -66,6 +67,16 @@ export class RecurringEventService {
           registrationFee: event.registrationFee,
           registrationAttendees: event.registrationAttendees,
           donationTarget: event.donationTarget,
+          donationsEnabled: event.donationsEnabled,
+          volunteerRoles: {
+            create: event.volunteerRoles.map((role) => ({
+              title: role.title,
+              description: role.description,
+              capacity: role.capacity,
+              requiresApproval: role.requiresApproval,
+              isOpen: role.isOpen,
+            })),
+          },
           startDate: newStartDate,
           endDate: newEndDate,
         },

@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   IsBoolean,
   IsArray,
   IsDateString,
@@ -11,29 +12,29 @@ import {
   IsString,
   IsUrl,
   ValidateIf,
+  ValidateNested,
   Max,
   MaxLength,
   Min,
 } from 'class-validator';
 
-import { Reoccurring } from '@prisma/client';
+import { Reoccurring, RegistrationType } from '@prisma/client';
 import { IsDateAfterMinutes } from 'src/common/validators/date-min-offset.decorator';
 import { IsDateGreaterThan } from 'src/common/validators/date-greater-than.decorator';
 import { normalizeEventLinks } from 'src/modules/event/event-links.util';
-import { Transform } from 'class-transformer';
-
-enum RegistrationType {
-  TICKET = 'ticket',
-  REGISTRATION = 'registration',
-  DONATION = 'donation',
-}
+import { plainToInstance, Transform, Type } from 'class-transformer';
+import { CreateVolunteerRoleDto } from '../../volunteer/dto/create-volunteer-role.dto';
 
 const coerceBoolean = (value: unknown) => {
   if (value === undefined || value === null || value === '') {
     return undefined;
   }
 
-  return value === true || value === 'true' || value === 1 || value === '1';
+  if (value === true || value === 'true' || value === 1 || value === '1')
+    return true;
+  if (value === false || value === 'false' || value === 0 || value === '0')
+    return false;
+  return value;
 };
 
 const isPhysicalEventEnabled = (value: unknown) =>
@@ -204,31 +205,76 @@ export class CreateEventDto {
 
   // ✅ Only required if registrationType = 'registration'
   @ApiPropertyOptional()
-  @ValidateIf((o) => o.registrationType === RegistrationType.REGISTRATION)
+  @ValidateIf((o) => o.registrationType === RegistrationType.registration)
   @IsNotEmpty()
   @IsNumber()
   @Min(1)
   registrationAttendees?: number;
 
   @ApiPropertyOptional()
-  @ValidateIf((o) => o.registrationType === RegistrationType.REGISTRATION)
+  @ValidateIf((o) => o.registrationType === RegistrationType.registration)
   @IsNotEmpty()
   @IsNumber()
   @Min(0)
   registrationFee?: number;
 
   @ApiPropertyOptional()
-  @ValidateIf((o) => o.registrationType === RegistrationType.DONATION)
+  @ValidateIf(
+    (o: CreateEventDto) =>
+      o.registrationType === RegistrationType.donation ||
+      o.donationTarget !== undefined,
+  )
   @IsNotEmpty()
   @IsNumber()
   @Min(500000)
   donationTarget?: number;
 
   @ApiPropertyOptional({ type: [String] })
-  @ValidateIf((o) => o.registrationType === RegistrationType.TICKET)
+  @ValidateIf((o) => o.registrationType === RegistrationType.ticket)
   @IsArray()
   @Transform(({ value }) => (Array.isArray(value) ? value : [value]))
   tickets?: string[];
+
+  @ApiPropertyOptional({
+    default: false,
+    description: 'Accept optional donations independently of participation.',
+  })
+  @IsOptional()
+  @Transform(
+    ({ obj, key }: { obj: Record<string, unknown>; key: string }) =>
+      coerceBoolean(obj[key]),
+    { toClassOnly: true },
+  )
+  @IsBoolean()
+  donationsEnabled?: boolean;
+
+  @ApiPropertyOptional({
+    type: [CreateVolunteerRoleDto],
+    description:
+      'Required for volunteer-only events. Also available for physical events with impact.',
+  })
+  @ValidateIf(
+    (o: CreateEventDto) =>
+      o.registrationType === RegistrationType.volunteer ||
+      o.volunteerRoles !== undefined,
+  )
+  @Transform(({ value }: { value: unknown }) => {
+    if (typeof value !== 'string') return value;
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return Array.isArray(parsed)
+        ? plainToInstance(CreateVolunteerRoleDto, parsed)
+        : parsed;
+    } catch {
+      return value;
+    }
+  })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => CreateVolunteerRoleDto)
+  volunteerRoles?: CreateVolunteerRoleDto[];
 
   @ApiPropertyOptional()
   @IsOptional()

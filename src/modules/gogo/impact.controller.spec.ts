@@ -9,7 +9,7 @@ import { ResponseInterceptor } from 'src/common/interceptors/response.intercepto
 import { getJwtSecret } from 'src/config/runtime-env';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { JwtStrategy } from '../auth/jwt.strategy';
-import { ImpactModule } from './impact.module';
+import { GogoModule } from './gogo.module';
 
 const emptyMap = {
   sdgGoals: [],
@@ -35,7 +35,7 @@ describe('Impact suggestions API', () => {
           ignoreEnvFile: true,
           load: [() => ({ DEEPSEEK_API_KEY: 'test-deepseek-key' })],
         }),
-        ImpactModule,
+        GogoModule,
       ],
       providers: [
         JwtStrategy,

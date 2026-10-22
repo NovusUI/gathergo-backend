@@ -70,6 +70,8 @@ model User {
   settlementAccountChanges    SettlementAccountChange[]
   settlementRecords           SettlementRecord[]
   impactReports               EventImpactReport[]
+  volunteerApplications       EventVolunteer[]          @relation("VolunteerUser")
+  confirmedVolunteerWork      EventVolunteer[]          @relation("VolunteerConfirmer")
 }
 
 model UserPreference {
@@ -147,6 +149,7 @@ model Event {
   registrationAttendees Int?
   registrationFee       Int?
   donationTarget        Int?
+  donationsEnabled      Boolean            @default(false)
   impactMapSentAt       DateTime?
   thumbnailUrl          String?
   registrationType      RegistrationType
@@ -161,10 +164,61 @@ model Event {
   isImageProcessing     Boolean            @default(false)
   feeds                 Feed[]
   impactReport          EventImpactReport?
+  volunteerRoles        VolunteerRole[]
+  volunteers            EventVolunteer[]
 
   transactions TransactionReference[]
 
   scanLogs ScanLog[]
+}
+
+model VolunteerRole {
+  id               String           @id @default(uuid())
+  eventId          String
+  title            String
+  description      String
+  capacity         Int
+  requiresApproval Boolean          @default(true)
+  isOpen           Boolean          @default(true)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  event            Event            @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  applications     EventVolunteer[]
+
+  @@unique([id, eventId])
+  @@index([eventId])
+}
+
+model EventVolunteer {
+  id               String          @id @default(uuid())
+  eventId          String
+  roleId           String
+  userId           String
+  status           VolunteerStatus @default(APPLIED)
+  note             String?
+  checkedInAt      DateTime?
+  completedAt      DateTime?
+  confirmedMinutes Int?
+  confirmedById    String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  event            Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  role             VolunteerRole   @relation(fields: [roleId, eventId], references: [id, eventId], onDelete: Cascade)
+  user             User            @relation("VolunteerUser", fields: [userId], references: [id])
+  confirmedBy      User?           @relation("VolunteerConfirmer", fields: [confirmedById], references: [id])
+
+  @@unique([eventId, userId])
+  @@index([roleId, status])
+  @@index([userId, status])
+}
+
+enum VolunteerStatus {
+  APPLIED
+  ACCEPTED
+  DECLINED
+  WITHDRAWN
+  CHECKED_IN
+  COMPLETED
 }
 
 model EventImpactReport {
@@ -711,6 +765,7 @@ enum RegistrationType {
   ticket
   registration
   donation
+  volunteer
 }
 
 enum TransactionStatusType {

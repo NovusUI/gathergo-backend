@@ -86,6 +86,11 @@ describe('Event-first flows', () => {
     const tx = {
       $queryRaw: jest.fn().mockResolvedValue([{ id: 'event-1' }]),
       event: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          registrationType: RegistrationType.registration,
+          donationsEnabled: false,
+          _count: { volunteerRoles: 0 },
+        }),
         update: jest
           .fn<Promise<{ id: string }>, [Prisma.EventUpdateArgs]>()
           .mockResolvedValue({ id: 'event-1' }),

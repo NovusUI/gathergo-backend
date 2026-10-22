@@ -82,6 +82,8 @@ describe('DashboardService', () => {
           { sold: 10, quantity: 20, price: 50000 },
         ],
         donations: [],
+        volunteerRoles: [],
+        volunteers: [],
         Registration: [],
       },
     ]);

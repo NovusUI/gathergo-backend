@@ -173,6 +173,7 @@ describe('TransactionReferenceService', () => {
       title: 'Ended Donation Drive',
       creatorId: 'creator_123',
       registrationType: 'donation',
+      donationsEnabled: true,
       endDate: new Date(Date.now() - 60_000),
     });
 
@@ -188,77 +189,81 @@ describe('TransactionReferenceService', () => {
     expect(prisma.transactionReference.create).not.toHaveBeenCalled();
   });
 
-  it('holds creator settlement but still initializes checkout when buyer velocity hits the fraud threshold', async () => {
-    const oldAccountDate = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+  it.each(['donation', 'volunteer', 'ticket', 'registration'])(
+    'initializes optional donations for %s events while holding settlement at the buyer velocity threshold',
+    async (registrationType) => {
+      const oldAccountDate = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
 
-    prisma.event.findUnique.mockResolvedValue({
-      id: 'event_123',
-      title: 'Community Fundraiser',
-      creatorId: 'creator_123',
-      registrationType: 'donation',
-      endDate: new Date(Date.now() + 60 * 60 * 1000),
-    });
-    prisma.user.findUnique
-      .mockResolvedValueOnce({ createdAt: oldAccountDate })
-      .mockResolvedValueOnce({ createdAt: oldAccountDate });
-    prisma.creatorSettlementProfile.findUnique.mockResolvedValue({
-      status: CreatorSettlementProfileStatus.ACTIVE,
-    });
-    prisma.transactionReference.count
-      .mockResolvedValueOnce(8)
-      .mockResolvedValueOnce(0);
-    prisma.transactionReference.aggregate.mockResolvedValue({
-      _sum: { creatorPayable: 0 },
-    });
-    prisma.transactionReference.create.mockResolvedValue({
-      id: 'txn_velocity_hold',
-    });
-    paystackService.initializeTransaction.mockResolvedValue({
-      status: true,
-      message: 'Authorization URL created',
-      data: {
-        authorization_url: 'https://paystack.test/pay/velocity',
-        reference: 'txn_velocity_hold',
-      },
-    });
+      prisma.event.findUnique.mockResolvedValue({
+        id: 'event_123',
+        title: 'Community Fundraiser',
+        creatorId: 'creator_123',
+        registrationType,
+        donationsEnabled: true,
+        endDate: new Date(Date.now() + 60 * 60 * 1000),
+      });
+      prisma.user.findUnique
+        .mockResolvedValueOnce({ createdAt: oldAccountDate })
+        .mockResolvedValueOnce({ createdAt: oldAccountDate });
+      prisma.creatorSettlementProfile.findUnique.mockResolvedValue({
+        status: CreatorSettlementProfileStatus.ACTIVE,
+      });
+      prisma.transactionReference.count
+        .mockResolvedValueOnce(8)
+        .mockResolvedValueOnce(0);
+      prisma.transactionReference.aggregate.mockResolvedValue({
+        _sum: { creatorPayable: 0 },
+      });
+      prisma.transactionReference.create.mockResolvedValue({
+        id: 'txn_velocity_hold',
+      });
+      paystackService.initializeTransaction.mockResolvedValue({
+        status: true,
+        message: 'Authorization URL created',
+        data: {
+          authorization_url: 'https://paystack.test/pay/velocity',
+          reference: 'txn_velocity_hold',
+        },
+      });
 
-    const result = await service.initiateDonation(
-      'buyer_123',
-      'buyer@example.com',
-      {
-        eventId: 'event_123',
-        amount: 500,
-      },
-    );
+      const result = await service.initiateDonation(
+        'buyer_123',
+        'buyer@example.com',
+        {
+          eventId: 'event_123',
+          amount: 500,
+        },
+      );
 
-    expect(result).toEqual(
-      expect.objectContaining({
-        transactionId: 'txn_velocity_hold',
-        paymentUrl: 'https://paystack.test/pay/velocity',
-        riskStatus: RiskStatus.HOLD,
-        settlementStatus: SettlementStatus.HELD_RISK,
-      }),
-    );
-    expect(prisma.transactionReference.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
+      expect(result).toEqual(
+        expect.objectContaining({
+          transactionId: 'txn_velocity_hold',
+          paymentUrl: 'https://paystack.test/pay/velocity',
           riskStatus: RiskStatus.HOLD,
           settlementStatus: SettlementStatus.HELD_RISK,
-          riskScore: 100,
-          riskReasons: expect.arrayContaining([
-            'buyer_velocity_same_event',
-            'buyer_velocity_block',
-          ]),
         }),
-      }),
-    );
-    expect(paystackService.initializeTransaction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        email: 'buyer@example.com',
-        reference: 'txn_velocity_hold',
-      }),
-    );
-  });
+      );
+      expect(prisma.transactionReference.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            riskStatus: RiskStatus.HOLD,
+            settlementStatus: SettlementStatus.HELD_RISK,
+            riskScore: 100,
+            riskReasons: expect.arrayContaining([
+              'buyer_velocity_same_event',
+              'buyer_velocity_block',
+            ]),
+          }),
+        }),
+      );
+      expect(paystackService.initializeTransaction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          email: 'buyer@example.com',
+          reference: 'txn_velocity_hold',
+        }),
+      );
+    },
+  );
 
   it('holds creator settlement for KYC but still initializes checkout when unverified exposure is above the cap', async () => {
     const oldAccountDate = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
@@ -268,6 +273,7 @@ describe('TransactionReferenceService', () => {
       title: 'Donation Drive',
       creatorId: 'creator_pending_kyc',
       registrationType: 'donation',
+      donationsEnabled: true,
       endDate: new Date(Date.now() + 60 * 60 * 1000),
     });
     prisma.user.findUnique
