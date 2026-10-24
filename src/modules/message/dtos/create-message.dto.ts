@@ -6,5 +6,8 @@ export class CreateMessageDto {
   @IsNotEmpty()
   @ApiProperty({ required: true, description: 'message string' })
   content: string;
+  @IsString()
+  @IsNotEmpty()
+  @ApiProperty({ description: 'Stable client message key, reused for retries' })
   tempId: string;
 }

@@ -1,5 +1,6 @@
 import {
   ForbiddenException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -65,53 +66,82 @@ export class MessageService {
     carpoolId: string,
     dto: CreateMessageDto,
   ) {
-    const carpool = await this.prisma.carpool.findUnique({
-      where: { id: carpoolId },
-      select: {
-        id: true,
-        expiresAt: true,
-        driverId: true,
-        passengers: {
-          where: { status: 'ACCEPTED' },
-          select: { userId: true },
-        },
-        event: {
-          select: {
-            title: true,
+    // Match checkout's transaction lock: retries must be safe across servers.
+    const { message, carpool, created } = await this.prisma.$transaction(
+      async (tx) => {
+        const key = JSON.stringify(['chat', userId, carpoolId, dto.tempId]);
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`;
+        const existing = await tx.message.findFirst({
+          where: { senderId: userId, carpoolId, tempId: dto.tempId },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          include: {
+            sender: { select: { id: true, username: true } },
+            readBy: { select: { id: true } },
           },
-        },
+        });
+        if (existing) {
+          if (existing.content !== dto.content) {
+            throw new ConflictException(
+              'This message key was already used for different content',
+            );
+          }
+          return { message: existing, carpool: null, created: false as const };
+        }
+        const carpool = await tx.carpool.findUnique({
+          where: { id: carpoolId },
+          select: {
+            id: true,
+            expiresAt: true,
+            driverId: true,
+            status: true,
+            passengers: {
+              where: { status: 'ACCEPTED' },
+              select: { userId: true },
+            },
+            event: {
+              select: {
+                title: true,
+              },
+            },
+          },
+        });
+
+        if (!carpool) throw new NotFoundException('Carpool not found');
+
+        const hasExpired = Date.now() > carpool.expiresAt.getTime();
+        if (hasExpired || carpool.status !== 'ACTIVE')
+          throw new ForbiddenException('Carpool conversation expired');
+
+        const isParticipant =
+          carpool.driverId === userId ||
+          carpool.passengers.some((p) => p.userId === userId);
+
+        if (!isParticipant)
+          throw new ForbiddenException(
+            'Not allowed to message in this carpool',
+          );
+
+        const message = await tx.message.create({
+          data: {
+            carpoolId,
+            senderId: userId,
+            content: dto.content,
+            tempId: dto.tempId,
+          },
+          include: {
+            sender: { select: { id: true, username: true } },
+            readBy: { select: { id: true } },
+          },
+        });
+
+        return { message, carpool, created: true as const };
       },
-    });
+    );
+    if (!created) return message;
 
-    if (!carpool) throw new NotFoundException('Carpool not found');
-
-    const hasExpired =
-      Date.now() > new Date(carpool.expiresAt).getTime() + 12 * 60 * 60 * 1000;
-    if (hasExpired)
-      throw new ForbiddenException('Carpool conversation expired');
-
-    const isParticipant =
-      carpool.driverId === userId ||
-      carpool.passengers.some((p) => p.userId === userId);
-
-    if (!isParticipant)
-      throw new ForbiddenException('Not allowed to message in this carpool');
-
-    console.log(dto.content);
-
-    const message = await this.prisma.message.create({
-      data: {
-        carpoolId,
-        senderId: userId,
-        content: dto.content,
-        tempId: dto.tempId,
-      },
-      include: {
-        sender: { select: { id: true, username: true } },
-      },
-    });
-
-    await this.pubsubService.publish({
+    // Both delivery services log their own failures. A saved receipt must not
+    // wait for push or broadcast delivery.
+    void this.pubsubService.publish({
       carpoolId,
       senderId: userId,
       message,
@@ -123,17 +153,12 @@ export class MessageService {
       ...carpool.passengers.map((p) => p.userId),
     ].filter((id) => id !== userId);
 
-    const sender = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { username: true },
-    });
-
-    await this.notificationsService.sendMessageNotification({
+    void this.notificationsService.sendMessageNotification({
       userIds: participantIds,
       message,
       carpoolId,
       senderId: userId,
-      senderName: sender?.username || '',
+      senderName: message.sender.username ?? '',
       link: '/chat/' + carpoolId,
     });
 

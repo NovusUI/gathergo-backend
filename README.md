@@ -365,3 +365,9 @@ Apply migrations with `npx prisma migrate deploy` before releasing the new app.
 Run the database-backed tests with `node --env-file=.env test/interest-map.integration.cjs`.
 They require the existing local PostgreSQL/PostGIS setup, create an isolated schema
 from the current Prisma model, and remove that schema when finished.
+
+## Chat delivery
+
+`sendMessage` accepts `{ carpoolId, content, tempId }` and acknowledges either `{ ok: true, message }` after saving or `{ ok: false, error, retryable }`. Keep the same `tempId` when retrying a send. HTTP message creation also requires it. A PostgreSQL transaction lock, scoped to sender, conversation, and client key, returns the existing message on retries and rejects changed content. New sends still require an active, unexpired carpool and accepted membership. Saved retries remain confirmable after expiry. Saved-message acknowledgments do not wait for broadcast/push delivery; those existing services log their own failures. No schema migration is required.
+
+Run the chat database tests against an isolated local database whose name contains `chat_delivery_test`: `CHAT_TEST_DATABASE_URL=... npm test -- --runInBand --runTestsByPath src/modules/message/message.integration.spec.ts src/modules/message/message.gateway.spec.ts`. These tests exercise concurrent sends and actual Socket.IO acknowledgment frames; Redis and push delivery are isolated from external services.
