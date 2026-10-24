@@ -1,3 +1,5 @@
+import type { Message, User } from '@prisma/client';
+
 // notification.types.ts
 export type Notification = {
     id: string;
@@ -42,3 +44,8 @@ export type Notification = {
       username: string;
     };
   };
+
+export type ChatNotificationMessage = Pick<
+  Message,
+  'id' | 'content' | 'carpoolId' | 'senderId' | 'createdAt'
+> & { sender: Pick<User, 'username'> };
