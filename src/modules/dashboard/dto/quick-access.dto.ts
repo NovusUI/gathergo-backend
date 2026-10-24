@@ -14,8 +14,8 @@ export class QuickAccessItemDto {
   title: string;
 
   @ApiProperty({
-    example: 'events/feed500',
-    description: 'Navigation link/path',
+    example: 'dashboard/feed500',
+    description: 'Mobile navigation path; owned events open dashboard/:eventId',
   })
   link: string;
 

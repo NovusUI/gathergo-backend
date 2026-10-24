@@ -102,6 +102,7 @@ export class UserService {
       id: user.id,
       name: user.username,
       bio: user.bio,
+      eventsCount: user._count.eventsCreated,
       followersCount: user._count.followedBy,
       followingCount: user._count.following,
       isFollowing,

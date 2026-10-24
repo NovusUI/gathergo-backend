@@ -70,16 +70,84 @@ model User {
   settlementAccountChanges    SettlementAccountChange[]
   settlementRecords           SettlementRecord[]
   impactReports               EventImpactReport[]
+  volunteerApplications       EventVolunteer[]          @relation("VolunteerUser")
+  confirmedVolunteerWork      EventVolunteer[]          @relation("VolunteerConfirmer")
+  badges                      UserBadge[]
+}
+
+enum BadgeCode {
+  FIRST_GATHER
+  FAMILIAR_FACE
+  HELPING_HAND
+  TIME_GIVER
+  GATHER_MAKER
+  IMPACT_STORYTELLER
+  FIRST_GIFT
+  COMMUNITY_BACKER
+  STEADY_GIVER
+}
+
+model UserBadge {
+  userId   String
+  code     BadgeCode
+  earnedAt DateTime?
+  isPublic Boolean   @default(false)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, code])
 }
 
 model UserPreference {
-  id           String   @id @default(uuid())
-  userId       String   @unique
-  eventTypes   String[]
-  interests    String[]
-  location     String?
-  primaryUsage String?
-  user         User     @relation(fields: [userId], references: [id])
+  id              String           @id @default(uuid())
+  userId          String           @unique
+  eventTypes      String[]
+  interests       String[]
+  location        String?
+  primaryUsage    String?
+  helpModes       String[]         @default([])
+  learningEnabled Boolean          @default(true)
+  learningSince   DateTime         @default(now())
+  signals         InterestSignal[]
+  eventFeedback   EventFeedback[]
+  user            User             @relation(fields: [userId], references: [id])
+}
+
+model InterestSignal {
+  id           String             @id @default(uuid())
+  preferenceId String
+  eventId      String
+  kind         InterestSignalKind
+  createdAt    DateTime           @default(now())
+  preference   UserPreference     @relation(fields: [preferenceId], references: [id], onDelete: Cascade)
+  event        Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([preferenceId, eventId, kind])
+  @@index([preferenceId, createdAt])
+}
+
+enum InterestSignalKind {
+  LIKE
+  VIEW
+}
+
+enum EventFeedbackRating {
+  LOVED
+  OKAY
+  NOT_FOR_ME
+}
+
+model EventFeedback {
+  id            String               @id @default(uuid())
+  preferenceId  String
+  eventId       String
+  rating        EventFeedbackRating?
+  moreLikeThis  Boolean              @default(false)
+  respondedAt   DateTime?
+  deferredUntil DateTime?
+  preference    UserPreference       @relation(fields: [preferenceId], references: [id], onDelete: Cascade)
+  event         Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([preferenceId, eventId])
 }
 
 model UserFollow {
@@ -147,6 +215,7 @@ model Event {
   registrationAttendees Int?
   registrationFee       Int?
   donationTarget        Int?
+  donationsEnabled      Boolean            @default(false)
   impactMapSentAt       DateTime?
   thumbnailUrl          String?
   registrationType      RegistrationType
@@ -161,10 +230,63 @@ model Event {
   isImageProcessing     Boolean            @default(false)
   feeds                 Feed[]
   impactReport          EventImpactReport?
+  volunteerRoles        VolunteerRole[]
+  volunteers            EventVolunteer[]
+  interestSignals       InterestSignal[]
+  feedback              EventFeedback[]
 
   transactions TransactionReference[]
 
   scanLogs ScanLog[]
+}
+
+model VolunteerRole {
+  id               String           @id @default(uuid())
+  eventId          String
+  title            String
+  description      String
+  capacity         Int
+  requiresApproval Boolean          @default(true)
+  isOpen           Boolean          @default(true)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  event            Event            @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  applications     EventVolunteer[]
+
+  @@unique([id, eventId])
+  @@index([eventId])
+}
+
+model EventVolunteer {
+  id               String          @id @default(uuid())
+  eventId          String
+  roleId           String
+  userId           String
+  status           VolunteerStatus @default(APPLIED)
+  note             String?
+  checkedInAt      DateTime?
+  completedAt      DateTime?
+  confirmedMinutes Int?
+  confirmedById    String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  event            Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  role             VolunteerRole   @relation(fields: [roleId, eventId], references: [id, eventId], onDelete: Cascade)
+  user             User            @relation("VolunteerUser", fields: [userId], references: [id])
+  confirmedBy      User?           @relation("VolunteerConfirmer", fields: [confirmedById], references: [id])
+
+  @@unique([eventId, userId])
+  @@index([roleId, status])
+  @@index([userId, status])
+}
+
+enum VolunteerStatus {
+  APPLIED
+  ACCEPTED
+  DECLINED
+  WITHDRAWN
+  CHECKED_IN
+  COMPLETED
 }
 
 model EventImpactReport {
@@ -711,6 +833,7 @@ enum RegistrationType {
   ticket
   registration
   donation
+  volunteer
 }
 
 enum TransactionStatusType {

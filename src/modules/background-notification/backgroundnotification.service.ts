@@ -3,6 +3,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { FirebaseService } from '../firebase/firebase.service';
 import { RedisService } from 'src/redis/redis.service';
 import { Expo, ExpoPushMessage } from 'expo-server-sdk';
+import { getNotificationSound } from '../notification/notification-sounds';
+import type { ChatNotificationMessage } from '../notification/notification.types';
 
 export interface UserNotificationToken {
   userId: string;
@@ -206,7 +208,7 @@ export class NotificationsService {
 
       const messages: ExpoPushMessage[] = validTokens.map((token) => ({
         to: token,
-        sound: 'default',
+        ...getNotificationSound(type, data),
         title,
         body: message,
         data: {
@@ -251,7 +253,7 @@ export class NotificationsService {
     link,
   }: {
     userIds: string[];
-    message: any;
+    message: ChatNotificationMessage;
     carpoolId?: string;
     senderName?: string;
     senderId?: string;
@@ -358,7 +360,7 @@ export class NotificationsService {
     link,
   }: {
     tokens: string[];
-    message: any;
+    message: ChatNotificationMessage;
     carpoolId?: string;
     senderName?: string;
     senderId?: string;
@@ -373,7 +375,7 @@ export class NotificationsService {
 
       const messages: ExpoPushMessage[] = validTokens.map((token) => ({
         to: token,
-        sound: 'default',
+        ...getNotificationSound('NEW_MESSAGE'),
         title: senderName ? `New message from ${senderName}` : 'New message',
         body: message.content || 'You have a new message',
         data: {

@@ -5,13 +5,13 @@ import {
   MessageBody,
   ConnectedSocket,
 } from '@nestjs/websockets';
-import { Server, Socket } from 'socket.io';
-import { Logger, UseGuards } from '@nestjs/common';
+import { Socket } from 'socket.io';
+import { HttpException, Logger, UseGuards } from '@nestjs/common';
 import { MessageService } from './message.service';
 import { RedisPubSubService } from 'src/redis/redis.pubsub.service';
 import { WsJwtGuard } from 'src/common/guards/ws-jwt.guard';
 import { BaseGateway } from 'src/common/base.gateway';
-import { CarpoolValidationService } from '../validation/carpool-validation.service';
+import { CreateMessageDto } from './dtos/create-message.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 
 @WebSocketGateway({
@@ -100,23 +100,47 @@ export class MessageGateway extends BaseGateway {
   async handleSendMessage(
     @ConnectedSocket() client: Socket,
     @MessageBody()
-    payload: { carpoolId: string; content: string; tempId: string },
+    payload: CreateMessageDto & { carpoolId: string },
   ) {
-    const userId = client.handshake.auth.user.sub;
-
-    const hasAccess = await this.validateCarpoolAccess(
-      client,
-      payload.carpoolId,
-      this.prisma,
-    );
-    if (!hasAccess) return;
-
-    const message = await this.messageService.createMessage(
-      userId,
-      payload.carpoolId,
-
-      { content: payload.content, tempId: payload.tempId },
-    );
+    const userId = this.getUserId(client);
+    if (!userId)
+      return { ok: false as const, error: 'Unauthorized', retryable: false };
+    try {
+      if (
+        typeof payload.carpoolId !== 'string' ||
+        !payload.carpoolId ||
+        typeof payload.content !== 'string' ||
+        !payload.content.trim() ||
+        typeof payload.tempId !== 'string' ||
+        !payload.tempId
+      ) {
+        return {
+          ok: false as const,
+          error: 'Invalid message',
+          retryable: false,
+        };
+      }
+      // The service authorizes new sends; a saved retry remains confirmable
+      // even if the original confirmation was lost before the chat expired.
+      const message = await this.messageService.createMessage(
+        userId,
+        payload.carpoolId,
+        { content: payload.content, tempId: payload.tempId },
+      );
+      return { ok: true as const, message };
+    } catch (error) {
+      const retryable =
+        !(error instanceof HttpException) || error.getStatus() >= 500;
+      if (retryable) this.logger.error('Message delivery failed', error);
+      return {
+        ok: false as const,
+        error:
+          error instanceof HttpException
+            ? error.message
+            : 'Unable to send message. Please try again.',
+        retryable,
+      };
+    }
   }
 
   @SubscribeMessage('markMsgAsRead')

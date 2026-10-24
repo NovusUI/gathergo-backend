@@ -1,3 +1,4 @@
+import { UserPreferenceModule } from '../user-preference/user-preference.module';
 import { Module } from '@nestjs/common';
 import { EventController } from './event.controller';
 import { EventService } from './event.service';
@@ -6,7 +7,7 @@ import { EventTicketService } from '../event-ticket/event-ticket.service';
 import { MediaService } from '../media/media.service';
 
 @Module({
-  imports: [CarpoolQueueModule],
+  imports: [CarpoolQueueModule, UserPreferenceModule],
   controllers: [EventController],
   providers: [EventService, EventTicketService, MediaService],
 })

@@ -1,6 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { GetEventsDto, EventFilter } from '../dto/get-events.dto';
+import {
+  summarizeVolunteering,
+  volunteerEventMetrics,
+} from '../../volunteer/volunteer.util';
+import {
+  eventDashboardInclude,
+  EventDashboardData,
+} from '../event-dashboard.types';
 
 @Injectable()
 export class EventsService {
@@ -30,23 +38,7 @@ export class EventsService {
     const events = await this.prisma.event.findMany({
       where: whereClause,
       include: {
-        eventTickets: {
-          select: {
-            sold: true,
-            quantity: true,
-            price: true,
-          },
-        },
-        donations: {
-          select: {
-            amount: true,
-          },
-        },
-        Registration: {
-          select: {
-            id: true,
-          },
-        },
+        ...eventDashboardInclude,
         community: {
           select: {
             name: true,
@@ -61,9 +53,12 @@ export class EventsService {
       take: pageSize,
     });
 
-    const formattedEvents = events.map((event) =>
-      this.formatEvent(event, filter),
-    );
+    const formattedEvents = events.map((event) => ({
+      ...this.formatEvent(event, filter),
+      ...(event.registrationType === 'volunteer'
+        ? volunteerEventMetrics(event)
+        : { volunteering: summarizeVolunteering(event) }),
+    }));
 
     return {
       data: formattedEvents,
@@ -74,7 +69,7 @@ export class EventsService {
     };
   }
 
-  private formatEvent(event: any, filter: EventFilter) {
+  private formatEvent(event: EventDashboardData, filter: EventFilter) {
     let raised = 0;
     let participants = 0;
     let goal = 0;

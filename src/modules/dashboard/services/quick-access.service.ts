@@ -270,7 +270,7 @@ export class QuickAccessService {
       shortcuts.push({
         id: currentEvent.id,
         title: currentEvent.title,
-        link: `events/${currentEvent.id}`,
+        link: `dashboard/${currentEvent.id}`,
         iconColor: this.getEventColor(currentEvent, 0), // Current event gets first color
       });
     }
@@ -301,7 +301,7 @@ export class QuickAccessService {
       shortcuts.push({
         id: event.id,
         title: event.title,
-        link: `events/${event.id}`,
+        link: `dashboard/${event.id}`,
         iconColor: this.getEventColor(event, colorIndex),
       });
     });

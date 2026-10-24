@@ -24,13 +24,17 @@ import { CompleteProfileDto } from './dto/complete-profile-dto';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { EditBioDto } from './dto/edit-bio-dto';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { BadgeService } from '../badge/badge.service';
 
 @Controller('user')
 @ApiTags('Users')
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class UserController {
-  constructor(private readonly userService: UserService) {}
+  constructor(
+    private readonly userService: UserService,
+    private readonly badges: BadgeService,
+  ) {}
 
   @Patch('complete-profile')
   @ApiOperation({ summary: 'Complete user profile after signup' })
@@ -70,7 +74,11 @@ export class UserController {
     @Param('userId') targetUserId: string,
     @CurrentUser('id') viewerId?: string,
   ) {
-    return this.userService.getPublicProfile(targetUserId, viewerId);
+    const profile = await this.userService.getPublicProfile(
+      targetUserId,
+      viewerId,
+    );
+    return { ...profile, badges: await this.badges.getPublic(targetUserId) };
   }
 
   @Post('/profile-picture')

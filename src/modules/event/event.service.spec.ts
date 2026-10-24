@@ -1,5 +1,8 @@
+import { UserPreferenceService } from '../user-preference/user-preference.service';
 import { Reoccurring, RegistrationType } from '@prisma/client';
 import { EventService } from './event.service';
+import { plainToInstance } from 'class-transformer';
+import { CreateEventDto } from './dto/create-event.dto';
 
 describe('EventService', () => {
   const prisma = {
@@ -26,14 +29,42 @@ describe('EventService', () => {
       queueService,
       eventTicketService,
       mediaService,
+      new UserPreferenceService(prisma),
     );
   });
+
+  it.each(['ticket', 'registration', 'donation'] as const)(
+    'rejects volunteer roles when creating a %s event',
+    async (registrationType) => {
+      const dto = plainToInstance(CreateEventDto, {
+        title: 'Community day',
+        description: 'Care for our park.',
+        registrationType,
+        isPhysicalEvent: true,
+        location: 'Lagos park',
+        impactDescription: 'Restore shared green spaces.',
+        donationTarget: registrationType === 'donation' ? 500000 : undefined,
+        volunteerRoles: [
+          {
+            title: 'Tree planters',
+            description: 'Plant seedlings.',
+            capacity: 10,
+            requiresApproval: false,
+          },
+        ],
+      });
+      await expect(service.create('user-1', dto)).rejects.toThrow(
+        'only available for Volunteer and donation events',
+      );
+    },
+  );
 
   it('preserves registration pricing fields when editing unrelated details', async () => {
     const existingEvent = {
       id: 'event-1',
       creatorId: 'user-1',
       registrationType: RegistrationType.registration,
+      donationsEnabled: false,
       registrationFee: 5000,
       registrationAttendees: 150,
       reoccurring: Reoccurring.NONE,
@@ -44,6 +75,10 @@ describe('EventService', () => {
     const tx = {
       $queryRaw: jest.fn().mockResolvedValue([{ id: 'event-1' }]),
       event: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          ...existingEvent,
+          _count: { volunteerRoles: 0 },
+        }),
         update: jest.fn().mockResolvedValue({
           ...existingEvent,
           title: 'Updated title',
@@ -79,6 +114,10 @@ describe('EventService', () => {
     const tx = {
       $queryRaw: jest.fn().mockResolvedValue([{ id: 'event-1' }]),
       event: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          donationsEnabled: true,
+          _count: { volunteerRoles: 0 },
+        }),
         create: jest.fn().mockResolvedValue(createdEvent),
         update: jest.fn().mockResolvedValue(createdEvent),
       },

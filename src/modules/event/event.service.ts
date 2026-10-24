@@ -1,3 +1,5 @@
+import { UserPreferenceService } from '../user-preference/user-preference.service';
+import { rankPreferenceEvent } from '../user-preference/interest-profile';
 import {
   assertRegistrationCapacityEdit,
   assertTicketCapacityEdit,
@@ -20,6 +22,10 @@ import {
 import { CreateEventDto } from './dto/create-event.dto';
 import { normalizeEventLinks } from './event-links.util';
 import { UpdateEventDto } from './dto/update-event.dto';
+import {
+  assertVolunteerEvent,
+  occupiedVolunteerStatuses,
+} from '../volunteer/volunteer.util';
 import { CarpoolQueueService } from 'src/queue/carpool/queue.service';
 import { MediaService } from '../media/media.service';
 import { EventTicketService } from '../event-ticket/event-ticket.service';
@@ -68,6 +74,7 @@ export class EventService {
     private readonly queueService: CarpoolQueueService, // Injected
     private eventTicketService: EventTicketService,
     private mediaService: MediaService,
+    private readonly preferences: UserPreferenceService,
   ) {}
 
   private getLowestTicketPrice(event: {
@@ -94,6 +101,26 @@ export class EventService {
     dto: CreateEventDto,
     file?: Express.Multer.File,
   ) {
+    const donationsEnabled = this.resolveDonationsEnabled(
+      dto.registrationType,
+      dto.donationsEnabled,
+      dto.donationTarget,
+    );
+    if (dto.registrationType === 'volunteer') {
+      if (!dto.volunteerRoles?.length)
+        throw new BadRequestException(
+          'Volunteer events require at least one volunteer role',
+        );
+    }
+    this.assertVolunteerOnlySettings(dto.registrationType, dto);
+    if (dto.volunteerRoles?.length) {
+      assertVolunteerEvent({
+        isPhysicalEvent: dto.isPhysicalEvent !== false,
+        registrationType: dto.registrationType,
+        impactTitle: dto.impactTitle?.trim() || null,
+        impactDescription: dto.impactDescription?.trim() || null,
+      });
+    }
     // let imageUrl = dto.imageUrl;
     // let thumbnailUrl: string | null = null;
 
@@ -113,6 +140,7 @@ export class EventService {
         : [];
     const shouldCreateSettlementProfile = this.requiresSettlementProfile({
       registrationType: dto.registrationType,
+      donationsEnabled,
       registrationFee: dto.registrationFee,
       tickets: parsedTickets,
     });
@@ -156,8 +184,11 @@ export class EventService {
             dto.registrationType === 'registration'
               ? dto.registrationAttendees
               : null,
-          donationTarget:
-            dto.registrationType === 'donation' ? dto.donationTarget : null,
+          donationTarget: donationsEnabled ? dto.donationTarget : null,
+          donationsEnabled,
+          volunteerRoles: dto.volunteerRoles
+            ? { create: dto.volunteerRoles }
+            : undefined,
         },
       });
 
@@ -205,6 +236,31 @@ export class EventService {
 
       const result = await this.prisma.$transaction(async (tx) => {
         await lockCheckoutEvent(tx, id);
+        const currentEvent = await tx.event.findUniqueOrThrow({
+          where: { id },
+          include: { _count: { select: { volunteerRoles: true } } },
+        });
+        this.assertVolunteerOnlySettings(effectiveRegistrationType, dto);
+        if (currentEvent._count.volunteerRoles > 0) {
+          assertVolunteerEvent({
+            ...currentEvent,
+            isPhysicalEvent:
+              dto.isPhysicalEvent ?? currentEvent.isPhysicalEvent,
+            impactTitle:
+              dto.impactTitle !== undefined
+                ? dto.impactTitle?.trim() || null
+                : currentEvent.impactTitle,
+            impactDescription:
+              dto.impactDescription !== undefined
+                ? dto.impactDescription?.trim() || null
+                : currentEvent.impactDescription,
+          });
+        }
+        const donationsEnabled = this.resolveDonationsEnabled(
+          effectiveRegistrationType,
+          dto.donationsEnabled ?? currentEvent.donationsEnabled,
+          dto.donationTarget,
+        );
         if (typeof dto.registrationAttendees === 'number')
           await assertRegistrationCapacityEdit(
             tx,
@@ -241,6 +297,9 @@ export class EventService {
           startDate: dto.startDate ? new Date(dto.startDate) : undefined,
           endDate: dto.endDate ? new Date(dto.endDate) : undefined,
           isImageProcessing: file ? true : undefined,
+          donationsEnabled: dto.donationsEnabled,
+          donationTarget:
+            dto.donationsEnabled === false ? null : dto.donationTarget,
         };
 
         if (dto.endRepeat !== undefined) {
@@ -256,10 +315,6 @@ export class EventService {
           eventUpdateData.registrationFee = dto.registrationFee ?? undefined;
           eventUpdateData.registrationAttendees =
             dto.registrationAttendees ?? undefined;
-        }
-
-        if (effectiveRegistrationType === 'donation') {
-          eventUpdateData.donationTarget = dto.donationTarget ?? undefined;
         }
 
         // 2) Update the event itself
@@ -337,6 +392,7 @@ export class EventService {
         if (
           this.requiresSettlementProfile({
             registrationType: effectiveRegistrationType,
+            donationsEnabled,
             registrationFee: updatedEvent.registrationFee,
             tickets: currentTickets,
           })
@@ -500,12 +556,49 @@ export class EventService {
     return null;
   }
 
+  private resolveDonationsEnabled(
+    registrationType: CreateEventDto['registrationType'],
+    setting: boolean | undefined,
+    donationTarget: number | undefined,
+  ) {
+    if (registrationType === 'donation' && setting === false) {
+      throw new BadRequestException('Donation events must accept donations');
+    }
+    const enabled = registrationType === 'donation' || setting === true;
+    if (donationTarget !== undefined && !enabled) {
+      throw new BadRequestException(
+        'Enable donations before setting a donation target',
+      );
+    }
+    return enabled;
+  }
+
+  private assertVolunteerOnlySettings(
+    registrationType: CreateEventDto['registrationType'],
+    dto: Pick<
+      CreateEventDto,
+      'tickets' | 'registrationFee' | 'registrationAttendees'
+    >,
+  ) {
+    if (
+      registrationType === 'volunteer' &&
+      (dto.tickets !== undefined ||
+        dto.registrationFee !== undefined ||
+        dto.registrationAttendees !== undefined)
+    ) {
+      throw new BadRequestException(
+        'Volunteer-only events do not use tickets or attendee registration',
+      );
+    }
+  }
+
   private requiresSettlementProfile(input: {
     registrationType?: string | null;
     registrationFee?: number | null;
     tickets?: Array<{ price?: number | null; updatedPrice?: number | null }>;
+    donationsEnabled: boolean;
   }) {
-    if (input.registrationType === 'donation') {
+    if (input.donationsEnabled) {
       return true;
     }
 
@@ -558,6 +651,18 @@ export class EventService {
         },
         eventTickets: true,
         impactReport: true,
+        volunteerRoles: {
+          include: {
+            _count: {
+              select: {
+                applications: {
+                  where: { status: { in: occupiedVolunteerStatuses } },
+                },
+              },
+            },
+          },
+        },
+        volunteers: { where: { userId } },
       },
     });
     if (!event) throw new NotFoundException('Event not found');
@@ -566,9 +671,12 @@ export class EventService {
     const hasPaidRegistration =
       event.registrationType === 'registration' &&
       (event.registrationFee || 0) > 0;
-    const acceptsDonations = event.registrationType === 'donation';
+    const acceptsDonations = event.donationsEnabled;
     const requiresPayment =
-      hasPaidTicket || hasPaidRegistration || acceptsDonations;
+      hasPaidTicket ||
+      hasPaidRegistration ||
+      event.registrationType === 'donation';
+    const canCollectFunds = requiresPayment || acceptsDonations;
 
     const creatorAlatProfile = await this.prisma.creatorAlatProfile.findUnique({
       where: { userId: event.creator.id },
@@ -586,13 +694,13 @@ export class EventService {
         },
       });
     const supportsAlatTransfer =
-      requiresPayment &&
+      canCollectFunds &&
       creatorSettlementProfile?.status === 'ACTIVE' &&
       creatorAlatProfile?.status === 'ACTIVE' &&
       Boolean(creatorAlatProfile?.businessId);
     const availableProviders = supportsAlatTransfer
       ? [PaymentProvider.PAYSTACK, PaymentProvider.ALAT_TRANSFER]
-      : requiresPayment
+      : canCollectFunds
         ? [PaymentProvider.PAYSTACK]
         : [];
 
@@ -636,14 +744,15 @@ export class EventService {
       isFollowedByCreator: Boolean(isFollowedByCreator),
       paymentOptions: {
         requiresPayment,
-        supportsPaystack: requiresPayment,
+        acceptsDonations,
+        supportsPaystack: canCollectFunds,
         supportsAlatTransfer,
         availableProviders,
         alatTransferDisplayName: supportsAlatTransfer
           ? creatorAlatProfile?.displayName || null
           : null,
         alatTransferUnavailableReason:
-          requiresPayment && !supportsAlatTransfer
+          canCollectFunds && !supportsAlatTransfer
             ? 'ALAT transfer is not available for this event yet'
             : null,
         pricingConfig: getCheckoutPricingConfig({ availableProviders }),
@@ -826,171 +935,29 @@ export class EventService {
   }
 
   async getForYouEvents(userId: string) {
-    // ⏰ 24hr grace period
-    const nowMinus24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
-    // Get user preferences
-    const userPreference = await this.prisma.userPreference.findUnique({
-      where: { userId },
-    });
-
-    const preferredTags = userPreference?.eventTypes || [];
-    const preferredLocations = userPreference?.location || '';
-    const preferredInterests = userPreference?.interests || [];
-
-    const events: any[] = [];
-    const eventIds = new Set<string>();
-
-    /**
-     * 1️⃣ Events the user created
-     */
-    const createdEvents = await this.prisma.event.findMany({
-      where: {
-        creatorId: userId,
-        endDate: { gte: nowMinus24h },
-      },
+    const { profile, signals } = await this.preferences.rankingProfile(userId);
+    const events = await this.prisma.event.findMany({
+      where: { endDate: { gt: new Date() } },
       include: eventCardInclude,
+      orderBy: { startDate: 'asc' },
+      take: 200,
     });
-
-    for (const ev of createdEvents) {
-      if (!eventIds.has(ev.id)) {
-        events.push(ev);
-        eventIds.add(ev.id);
-      }
-    }
-
-    /**
-     * 2️⃣ Events the user registered for
-     */
-    const registrations = await this.prisma.registration.findMany({
-      where: { userId },
-      include: {
-        event: {
-          include: eventCardInclude,
-        },
-      },
-    });
-
-    const registeredEvents = registrations
-      .map((r) => r.event)
-      .filter(
-        (e): e is NonNullable<typeof e> => !!e && e.endDate >= nowMinus24h,
-      );
-
-    for (const ev of registeredEvents) {
-      if (!eventIds.has(ev.id)) {
-        events.push(ev);
-        eventIds.add(ev.id);
-      }
-    }
-
-    /**
-     * 3️⃣ Ticketed events
-     */
-    const tickets = await this.prisma.ticket.findMany({
-      where: { userId },
-      include: {
-        eventTicket: {
-          include: {
-            event: {
-              include: eventCardInclude,
-            },
-          },
-        },
-      },
-    });
-
-    const ticketedEvents = tickets
-      .map((t) => t.eventTicket?.event)
-      .filter(
-        (e): e is NonNullable<typeof e> => !!e && e.endDate >= nowMinus24h,
-      );
-
-    for (const ev of ticketedEvents) {
-      if (!eventIds.has(ev.id)) {
-        events.push(ev);
-        eventIds.add(ev.id);
-      }
-    }
-
-    /**
-     * 4️⃣ Preference-based events
-     */
-    if (events.length < 10) {
-      const preferenceEvents = await this.prisma.event.findMany({
-        where: {
-          endDate: { gte: nowMinus24h },
-          OR: [
-            { tags: { hasSome: preferredTags } },
-            { location: preferredLocations },
-            { tags: { hasSome: preferredInterests } },
-          ],
-        },
-        include: eventCardInclude,
-        take: 20,
-      });
-
-      for (const ev of preferenceEvents) {
-        if (!eventIds.has(ev.id) && events.length < 10) {
-          events.push(ev);
-          eventIds.add(ev.id);
-        }
-      }
-    }
-
-    /**
-     * 5️⃣ Fallback events
-     */
-    if (events.length < 10) {
-      const fallbackEvents = await this.prisma.event.findMany({
-        where: { endDate: { gte: nowMinus24h } },
-        include: eventCardInclude,
-        orderBy: { startDate: 'asc' },
-        take: 20,
-      });
-
-      for (const ev of fallbackEvents) {
-        if (!eventIds.has(ev.id) && events.length < 10) {
-          events.push(ev);
-          eventIds.add(ev.id);
-        }
-      }
-    }
-
-    /**
-     * 6️⃣ Add reasons
-     */
-    const eventResults = events.map((event) => {
-      let reason = 'Recommended';
-
-      if (createdEvents.find((e) => e.id === event.id)) {
-        reason = 'You created this event';
-      } else if (registeredEvents.find((e) => e.id === event.id)) {
-        reason = 'You registered for this event';
-      } else if (ticketedEvents.find((e) => e.id === event.id)) {
-        reason = 'You already have tickets for this event';
-      } else if (
-        (preferredTags.length &&
-          event.tags.some((tag) => preferredTags.includes(tag))) ||
-        (preferredInterests.length &&
-          event.tags.some((tag) => preferredInterests.includes(tag))) ||
-        (preferredLocations.length &&
-          preferredLocations.includes(event.location))
-      ) {
-        reason = 'Based on your preferences';
-      } else {
-        reason = 'Popular or upcoming event';
-      }
-
-      return { ...event, reason };
-    });
-
-    const eventsWithPricing = eventResults.map((event) => ({
-      ...event,
-      lowestTicketPrice: this.getLowestTicketPrice(event),
-    }));
-
-    return eventsWithPricing.slice(0, 10); // ensure max 10
+    return events
+      .map((event) => ({
+        event,
+        ...rankPreferenceEvent(event, profile, signals),
+      }))
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          a.event.startDate.getTime() - b.event.startDate.getTime(),
+      )
+      .slice(0, 10)
+      .map(({ event, reason }) => ({
+        ...event,
+        reason,
+        lowestTicketPrice: this.getLowestTicketPrice(event),
+      }));
   }
 
   async getAllUserEvents(userId: string, page = 1, pageSize = 10) {

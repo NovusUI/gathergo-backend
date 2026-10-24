@@ -18,7 +18,7 @@ export class DonationImpactMapService {
 
     const events = await this.prisma.event.findMany({
       where: {
-        registrationType: 'donation',
+        donations: { some: { status: 'completed' } },
         endDate: { lte: cutoff },
         impactMapSentAt: null,
       },

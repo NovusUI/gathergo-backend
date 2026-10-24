@@ -3,6 +3,8 @@ import * as admin from 'firebase-admin';
 import { v4 as uuid } from 'uuid';
 import { Bucket } from '@google-cloud/storage';
 import * as sharp from 'sharp';
+import { getNotificationSound } from '../notification/notification-sounds';
+import type { ChatNotificationMessage } from '../notification/notification.types';
 
 @Injectable()
 export class FirebaseService {
@@ -34,7 +36,7 @@ export class FirebaseService {
    */
   async sendPushNotification(
     tokens: string | string[],
-    payload: admin.messaging.MessagingPayload,
+    payload: Omit<admin.messaging.MulticastMessage, 'tokens'>,
   ) {
     const allTokens = Array.isArray(tokens) ? tokens : [tokens];
     const CHUNK_SIZE = 500;
@@ -106,31 +108,35 @@ export class FirebaseService {
     messageId,
   }: {
     tokens: string | string[];
-    message: any;
+    message: ChatNotificationMessage;
     carpoolId?: string;
     senderName?: string;
     senderId?: string;
     messageId?: string;
   }) {
-    const payload: admin.messaging.MessagingPayload = {
+    const { sound, channelId } = getNotificationSound('NEW_MESSAGE');
+    const payload: Omit<admin.messaging.MulticastMessage, 'tokens'> = {
       notification: {
-        title: `New message from ${'test sender'}`,
+        title: senderName ? `New message from ${senderName}` : 'New message',
         body: message.content,
-        sound: 'default',
-        badge: '1',
       },
       data: {
         type: 'NEW_MESSAGE',
-        message,
+        message: JSON.stringify(message),
         carpoolId: carpoolId || message.carpoolId || '',
         messageId: messageId || message.id || '',
         senderId: senderId || message.senderId || '',
         senderName: senderName || message.sender?.username || '',
         content: message.content || '',
-        createdAt: message.createdAt || new Date().toISOString(),
+        createdAt: message.createdAt.toISOString(),
         // Ensure consistent data structure with Expo
         screen: 'Chat',
       },
+      android: {
+        priority: 'high',
+        notification: { channelId, sound: sound.replace('.wav', '') },
+      },
+      apns: { payload: { aps: { sound, badge: 1 } } },
     };
 
     return this.sendPushNotification(tokens, payload);
@@ -220,53 +226,46 @@ export class FirebaseService {
         return;
       }
 
-      // Construct the notification payload
-      const messagePayload: admin.messaging.MulticastMessage = {
-        tokens,
+      const { sound, channelId } = getNotificationSound(type, data);
+      const messagePayload: Omit<admin.messaging.MulticastMessage, 'tokens'> = {
         notification: {
           title,
           body: message,
         },
-        data: {
-          type,
-          title,
-          message,
-          link: link || '',
-          timestamp: new Date().toISOString(),
-          ...data,
-        },
+        data: Object.fromEntries(
+          Object.entries({
+            type,
+            title,
+            message,
+            link: link || '',
+            timestamp: new Date().toISOString(),
+            ...data,
+          })
+            .filter(([, value]) => value !== undefined)
+            .map(([key, value]) => [
+              key,
+              typeof value === 'string' ? value : JSON.stringify(value),
+            ]),
+        ),
         android: {
           priority: 'high',
           notification: {
-            channelId: 'default',
-            sound: 'default',
+            channelId,
+            sound: sound.replace('.wav', ''),
             priority: 'high',
           },
         },
         apns: {
           payload: {
             aps: {
-              sound: 'default',
+              sound,
               badge: 1,
             },
           },
         },
       };
 
-      // Send the notification
-      //const response = await this.messaging.sendEachForMulticast(messagePayload);
-
-      // Handle invalid tokens
-      // if (response.failureCount > 0) {
-      //   response.responses.forEach((resp, idx) => {
-      //     if (!resp.success) {
-      //       this.logger.warn(`Failed to send to token ${tokens[idx]}: ${resp.error?.message}`);
-      //       // Optionally remove invalid tokens here
-      //     }
-      //   });
-      // }
-
-      //this.logger.log(`Sent ${response.successCount} regular notifications via FCM`);
+      await this.sendPushNotification(tokens, messagePayload);
     } catch (error) {
       this.logger.error('Failed to send regular notification via FCM:', error);
       throw error;

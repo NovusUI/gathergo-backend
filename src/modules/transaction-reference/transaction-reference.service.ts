@@ -430,6 +430,7 @@ export class TransactionReferenceService {
         title: true,
         creatorId: true,
         registrationType: true,
+        donationsEnabled: true,
         endDate: true,
       },
     });
@@ -438,8 +439,8 @@ export class TransactionReferenceService {
       throw new NotFoundException('Event not found');
     }
 
-    if (event.registrationType !== 'donation') {
-      throw new BadRequestException('Event is not a donation event');
+    if (!event.donationsEnabled) {
+      throw new BadRequestException('This event is not accepting donations');
     }
 
     this.assertEventStillAcceptsPayments(event);
