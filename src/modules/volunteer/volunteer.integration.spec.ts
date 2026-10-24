@@ -1,3 +1,4 @@
+import { UserPreferenceService } from '../user-preference/user-preference.service';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
@@ -76,6 +77,7 @@ integration('physical event volunteering (isolated PostgreSQL)', () => {
       providers: [
         VolunteerService,
         EventService,
+        UserPreferenceService,
         EventTicketService,
         JwtStrategy,
         EventsService,
@@ -377,22 +379,25 @@ integration('physical event volunteering (isolated PostgreSQL)', () => {
     RegistrationType.registration,
     RegistrationType.donation,
   ])(
-    'supports volunteer roles on a physical %s event with impact',
+    'rejects volunteer role creation and applications on a physical %s event with impact',
     async (registrationType) => {
       await prisma.event.update({
         where: { id: event.id },
         data: { registrationType, impactTitle: 'Support our community' },
       });
-      expect(
-        await service.createRole(event.id, users[0], roleInput),
-      ).toMatchObject({ eventId: event.id });
+      await expect(
+        service.createRole(event.id, users[0], roleInput),
+      ).rejects.toThrow('only available for Volunteer and donation events');
+      await expect(
+        service.apply(event.id, role.id, users[1], {}),
+      ).rejects.toThrow('only available for Volunteer and donation events');
     },
   );
 
   it('rejects recruitment on ordinary events and online events, including organiser attempts', async () => {
     await prisma.event.update({
       where: { id: event.id },
-      data: { registrationType: 'registration', impactDescription: null },
+      data: { registrationType: 'volunteer', impactDescription: null },
     });
     await expect(
       service.createRole(event.id, users[0], roleInput),
@@ -463,7 +468,7 @@ integration('physical event volunteering (isolated PostgreSQL)', () => {
     ).rejects.toThrow('physical events');
     await prisma.event.update({
       where: { id: event.id },
-      data: { registrationType: 'registration', impactTitle: 'Impact' },
+      data: { registrationType: 'volunteer', impactTitle: 'Impact' },
     });
     await expect(
       events.update(users[0], event.id, { impactDescription: '' }),

@@ -109,21 +109,40 @@ draft and must review and publish there. Deploy this endpoint before releasing
 the conversational UI. Provider errors offer retry or the manual form rather
 than a simulated conversation. Requests are limited to 20 per minute per IP.
 
+The request includes `addressedSections` (completed or skipped
+optional invitations), `draft.impactMapCount` and the required boolean
+`draft.hasImpactGoalOrPath`; replies include `completedSection`
+for conversational acceptance or skipping. Initial descriptions supply editable
+copy and all available date, venue and pricing facts. Required details come first,
+then optional impact story, impact map, links and interests. Volunteer roles are
+required only for Volunteer and donation events; Gogo never offers roles for the
+other event types.
+Gogo skips the interests invitation when an impact story and at least one global
+goal or impact path are selected; commitments alone do not skip it. Manual interest
+editing remains available. The server enforces this order and volunteering
+eligibility before human review. Confirmation of a step already recorded in
+`addressedSections` is idempotent, so completing or skipping an editor can continue
+to the next step. Invalid drafts and replies log validation reasons without
+logging organiser text, provider output or credentials.
+
 ## Event volunteering
 
-Physical events can use `registrationType: "volunteer"` with at least one
-`volunteerRoles` entry, without tickets, attendee registration, fees, or donations.
+Volunteer and donation events use `registrationType: "volunteer"` with at least
+one `volunteerRoles` entry, without tickets, attendee registration or fees.
+Donations remain optional; the stored participation value remains `volunteer`.
+Ticket, registration and fundraiser events cannot create volunteer roles or accept
+volunteer applications.
 Each role has `title`, `description`, `capacity`, and `requiresApproval` (default
 `true`). Multipart event creation accepts `volunteerRoles` as a JSON array.
 
-Every event must have non-empty `impactDescription` story text before it can
-recruit volunteers, including volunteer-only events and fundraisers. An impact
-title alone does not qualify. Online events cannot recruit volunteers. An event
-with volunteer roles must retain its physical location and impact story.
+Volunteer and donation events must have non-empty `impactDescription` story
+text and a physical venue before recruiting volunteers. An impact title alone
+does not qualify. Events with volunteer roles must retain their physical venue
+and impact story.
 
 `donationsEnabled` enables optional fundraising independently of participation.
 It defaults to `false` for new events except donation events, which always accept
-donations. A donation target is optional for other event types and uses kobo.
+donations. A donation target is optional for Volunteer and donation events and uses kobo.
 Volunteer participation never requires payment or an attendee registration.
 Existing ticket and registration checkout remains separate.
 
@@ -152,7 +171,7 @@ only and cannot exceed the time from check-in to event end. Close recruitment
 with `isOpen: false` to retain application history.
 
 Organiser dashboards expose a separate `volunteering` summary for all events.
-For volunteer-only events, `participants` counts confirmed places; money raised
+For Volunteer and donation events, `participants` counts confirmed places; money raised
 and monetary goals remain separate from `volunteering.recruitmentProgress`.
 
 Apply migration `20261019120000_event_volunteering` and regenerate Prisma before
@@ -163,6 +182,50 @@ remote and community volunteering are outside this version.
 The volunteering integration suite requires an isolated local PostgreSQL database
 whose name contains `volunteer_test`, with the migrations applied. Run
 `VOLUNTEER_TEST_DATABASE_URL=postgresql://...@127.0.0.1:5432/gathergo_volunteer_test npm test -- --runInBand --runTestsByPath src/modules/volunteer/volunteer.integration.spec.ts`.
+
+## Gather achievements
+
+The profile Gather tab shows all nine starter achievements together across attending,
+volunteering, hosting and giving. `BadgeModule` owns the rules and progress.
+Gogo's existing mobile mascot explains the next step and celebrates earned badges;
+this experience does not need an AI-provider request.
+
+All routes require authentication and use the standard response envelope:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/v1/badges/me` | All nine badges, earned count, exact requirements, progress and Gogo guidance |
+| `GET /api/v1/badges/users/:userId` | Only earned badges the user shares publicly |
+| `PATCH /api/v1/badges/me/:code/visibility` | Save `{ "isPublic": true/false }` for an earned badge |
+
+`GET /api/v1/user/public/:userId` also includes the public badge projection.
+The profile summary includes created-event, follower and following counts.
+Private progress, donation amounts and supported events are never included in it.
+Giving badges start private, including badges earned through anonymous donations.
+
+Progress is reconciled from existing activity whenever badges or a public profile
+are read, including historical activity. The app refreshes on profile focus and
+supports pull-to-refresh. Purchases and registrations alone do not count as
+attendance; distinct recorded check-ins do, including volunteer check-ins.
+Volunteer hours require completed, organiser-confirmed work. Hosting requires an
+ended event with another person checked in. Impact Storyteller recognises a
+published post-event report, not independent verification of its claims.
+
+Donations require a completed donation record linked to a successful, fulfilled
+`DONATION` transaction for the same user and event, without a refund record.
+Repeated gifts to one event count once toward Community Backer. Steady Giver counts
+three distinct calendar months in `Africa/Lagos`; they need not be consecutive.
+Progress and awards are reconciled after refunds or removed qualifying activity;
+saved visibility preferences are retained if a badge is earned again.
+
+Before releasing the mobile UI, apply migration `20261023170000_user_badges` and
+regenerate Prisma. No new production dependencies are required. Badge integration
+tests require an isolated local database with `badge_test` in its name and all
+migrations applied:
+
+```bash
+BADGE_TEST_DATABASE_URL=postgresql://...@127.0.0.1:5432/gathergo_badge_test npm test -- --runInBand --runTestsByPath src/modules/badge/badge.integration.spec.ts src/modules/badge/badge-progress.spec.ts
+```
 
 ## Run tests
 
@@ -220,6 +283,11 @@ Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
 
 ### Ticket and registration checkout safety
 
+Organisers can publish hidden tickets directly from the event page’s ticket sheet.
+`PATCH /api/v1/event-tickets/:ticketId` accepts `{ "isVisible": true }` without
+resending price, stock or other details. Ownership checks still apply; visibility
+must be a JSON boolean when provided.
+
 Paid checkouts reserve capacity for `CHECKOUT_HOLD_SECONDS` (default 300 seconds), with `CHECKOUT_MAX_TICKETS` (default 4) per ticket order and one active checkout per buyer/event. Free orders confirm immediately. Expired holds stop consuming capacity immediately, independent of the cleanup worker. Ticket capacity and registration capacity edits cannot undercut booked/reserved spaces.
 
 `POST /transaction-reference/initiate` and `/initiateReg` require a UUID v4 `Idempotency-Key` header. Reuse it for retries of the same order; a changed order with the same key returns 409. Ticket quantities are aggregated by ticket type and the complete order succeeds or fails together. URLs and transfer instructions are persisted for checkout recovery. Refreshing or reopening checkout never extends its deadline.
@@ -233,3 +301,67 @@ Paystack refunds are submitted once, then reconciled against its documented refu
 Roll out migration `20261017120000_checkout_reservations`, regenerate Prisma, and deploy backend/mobile together (older clients do not send checkout keys). The migration preserves historical admissions, assigns fulfillment identities, reconciles sold counts, and counts existing sponsored seats. Historical duplicates and oversold events require manual review; it does not delete admissions or raise event capacity. No live migration is performed by the checkout tests.
 
 Concurrency tests require a separate local PostgreSQL database with PostGIS and this schema, named `checkout_hardening...`. Run `CHECKOUT_TEST_DATABASE_URL=postgresql://...@127.0.0.1:5432/checkout_hardening npm test -- --runInBand --runTestsByPath src/modules/checkout/checkout.integration.spec.ts`. Provider calls and confirmation services are mocked; inventory, locks, rollbacks, webhook inbox, and refund state use real PostgreSQL. Migration preservation fixtures are in `test/fixtures/checkout-migration` (seed the pre-migration schema, apply the migration, run assertions).
+
+Gogo event creation now starts with the mobile participation-type choice. The
+draft's `registrationType` is required and cannot be changed by the model.
+Replies include a required nullable `suggestedImpactStory` (at most 180
+characters), separate from applied draft updates. The app displays that proposal
+in the conversation and writes it into the draft only when the organiser accepts
+or opens it for manual editing. Location and fundraising setup render inline.
+
+### Personal interest map
+
+After profile setup, Gogo asks for up to five interests, preferred ways to join in,
+an optional city and reactions to at most three real upcoming events. Every step
+can be skipped. Saving an empty map still completes onboarding. Settings and the
+For you feed link to map editing, passive-learning controls, reset and deletion.
+
+`GET /preferences/catalog` supplies the shared topics; `GET /preferences/examples`
+accepts comma-separated `interests` and optional `city`. `PATCH /preferences` takes
+`interests`, `helpModes` (`attend`, `volunteer`, `donate`, `carpool`), optional `city`,
+`learningEnabled` and up to three `likedEventIds`. `GET /preferences` returns the
+profile with weighted interests and source labels. All routes require authentication.
+
+`POST /preferences/signals` records one `LIKE` or `VIEW` per user/event/kind.
+Manual picks persist; dated event signals decay with a 30-day half-life. Passive
+learning also uses active registrations, tickets, donations and volunteer applications
+after the profile’s learning cutoff. Donation amounts do not affect the weights.
+Likes remain deliberate inputs when passive learning is off. `POST /preferences/reset-learning`
+clears signals and advances the cutoff while retaining choices. `DELETE /preferences`
+clears the map, turns passive learning off and preserves the completed onboarding flag.
+
+Recommendations combine interests, event-format/activity similarity, city and
+participation preferences across the next 200 upcoming events. The feed displays
+the associated recommendation reason. Availability, driving/riding questions, dwell
+time and saves are outside this first release.
+
+The home feed offers a Gogo survey for the most recent unanswered event that ended
+within 30 days, after the map’s learning cutoff, with a scanned used ticket or
+registration, or a checked-in/completed volunteer record. Purchases, registrations
+and donations without a check-in do not qualify. Only one survey opens per home
+screen visit. `GET /preferences/event-feedback/pending` returns `{ id, title,
+endDate }` or `null`.
+
+`POST /preferences/event-feedback/:eventId` accepts `rating` (`LOVED`, `OKAY`,
+`NOT_FOR_ME`) and the required boolean `moreLikeThis`. An answer replaces that
+same event’s earlier learning signals; retries do not accumulate weight. Explicit
+answers apply even when passive learning is off. Positive and neutral answers
+increase topic affinity, negative answers reduce it, and chosen interests retain
+a minimum weight of 3. The response includes the updated `profile`, actual
+before-and-after `changes`, `rating` and `moreLikeThis`. The UI shows the map
+confirmation only after the save succeeds. `NOT_FOR_ME` cannot be combined with
+`moreLikeThis: true`.
+
+`POST /preferences/event-feedback/:eventId/defer` implements “Not now”: it
+postpones that survey by 24 hours without an interest signal. Answered events are
+not prompted again. Map reset clears survey learning and advances the cutoff;
+map deletion removes the associated answers. These responses are private and do
+not appear in public profiles or organiser reports.
+
+Apply migration `20261023210000_post_event_feedback` and regenerate Prisma before
+releasing the survey UI. No notification service or AI provider is needed.
+
+Apply migrations with `npx prisma migrate deploy` before releasing the new app.
+Run the database-backed tests with `node --env-file=.env test/interest-map.integration.cjs`.
+They require the existing local PostgreSQL/PostGIS setup, create an isolated schema
+from the current Prisma model, and remove that schema when finished.

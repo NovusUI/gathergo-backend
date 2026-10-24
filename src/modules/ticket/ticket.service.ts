@@ -259,7 +259,7 @@ export class TicketService {
     if (markAsUsed) {
       await this.prisma.ticket.update({
         where: { id: ticket.id },
-        data: { isUsed: true },
+        data: { isUsed: true, status: 'used', scannedAt: new Date() },
       });
     }
 

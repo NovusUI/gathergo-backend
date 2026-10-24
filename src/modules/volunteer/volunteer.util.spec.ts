@@ -69,52 +69,49 @@ describe('volunteer participation metrics', () => {
     });
   });
 
-  it.each(['ticket', 'registration', 'donation', 'volunteer'] as const)(
-    'allows physical %s events with an impact story',
+  it.each(['ticket', 'registration', 'donation'] as const)(
+    'does not allow %s events to recruit volunteers even with a physical venue and story',
     (registrationType) => {
       expect(() =>
         assertVolunteerEvent({
           registrationType,
           isPhysicalEvent: true,
-          impactTitle: 'Community impact',
+          impactDescription: 'Help restore shared green spaces.',
+        }),
+      ).toThrow('only available for Volunteer and donation events');
+    },
+  );
+
+  it.each([false, true])(
+    'allows volunteer events with donationsEnabled=%s',
+    (donationsEnabled) => {
+      expect(() =>
+        assertVolunteerEvent({
+          registrationType: 'volunteer',
+          donationsEnabled,
+          isPhysicalEvent: true,
           impactDescription: 'Help restore shared green spaces.',
         }),
       ).not.toThrow();
     },
   );
 
-  it.each(['ticket', 'registration', 'donation', 'volunteer'] as const)(
-    'requires an impact story for %s events even when they have an impact title',
-    (registrationType) => {
-      for (const impactDescription of [null, '', '   ']) {
-        expect(() =>
-          assertVolunteerEvent({
-            registrationType,
-            isPhysicalEvent: true,
-            impactTitle: 'Community impact',
-            impactDescription,
-          }),
-        ).toThrow('Add an impact story');
-      }
-    },
-  );
-
-  it('requires a physical event and an impact story', () => {
+  it('requires a physical venue and an impact story for volunteer events', () => {
     expect(() =>
       assertVolunteerEvent({
         registrationType: 'volunteer',
         isPhysicalEvent: false,
-        impactTitle: null,
-        impactDescription: null,
+        impactDescription: 'Help restore shared green spaces.',
       }),
     ).toThrow('physical');
-    expect(() =>
-      assertVolunteerEvent({
-        registrationType: 'ticket',
-        isPhysicalEvent: true,
-        impactTitle: null,
-        impactDescription: null,
-      }),
-    ).toThrow('impact');
+    for (const impactDescription of [null, '', '   ']) {
+      expect(() =>
+        assertVolunteerEvent({
+          registrationType: 'volunteer',
+          isPhysicalEvent: true,
+          impactDescription,
+        }),
+      ).toThrow('Add an impact story');
+    }
   });
 });

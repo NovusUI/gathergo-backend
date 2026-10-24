@@ -75,8 +75,16 @@ export function volunteerEventMetrics(
 }
 
 export function assertVolunteerEvent<
-  T extends Pick<Event, 'isPhysicalEvent' | 'impactDescription'>,
+  T extends Pick<
+    Event,
+    'registrationType' | 'isPhysicalEvent' | 'impactDescription'
+  >,
 >(event: T) {
+  if (event.registrationType !== 'volunteer') {
+    throw new BadRequestException(
+      'Volunteer roles are only available for Volunteer and donation events',
+    );
+  }
   if (!event.isPhysicalEvent) {
     throw new BadRequestException(
       'Volunteering is only available at physical events',

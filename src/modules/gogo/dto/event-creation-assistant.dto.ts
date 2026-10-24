@@ -7,6 +7,7 @@ import {
   IsIn,
   IsObject,
   IsString,
+  ArrayUnique,
   MaxLength,
   MinLength,
   ValidateNested,
@@ -14,7 +15,9 @@ import {
 import type {
   EventCreationDraft,
   EventCreationMessage,
+  EventCreationOptionalSection,
 } from '../event-creation-assistant.types';
+import { EVENT_CREATION_OPTIONAL_SECTIONS } from '../event-creation-assistant.types';
 
 class EventCreationMessageDto implements EventCreationMessage {
   @ApiProperty({ enum: ['user', 'assistant'] })
@@ -47,8 +50,20 @@ export class EventCreationAssistantDto {
   messages: EventCreationMessageDto[];
 
   @ApiProperty({
+    enum: EVENT_CREATION_OPTIONAL_SECTIONS,
+    isArray: true,
     description:
-      'The current editable event draft. Donation targets are in kobo; registration fees are in naira.',
+      'Optional steps the organiser has finished or explicitly skipped.',
+  })
+  @IsArray()
+  @ArrayMaxSize(5)
+  @ArrayUnique()
+  @IsIn(EVENT_CREATION_OPTIONAL_SECTIONS, { each: true })
+  addressedSections: EventCreationOptionalSection[];
+
+  @ApiProperty({
+    description:
+      'The current editable event draft, including the selected participation type and required hasImpactGoalOrPath flag for a selected global goal or impact path. Donation targets are in kobo; registration fees are in naira.',
   })
   @IsObject()
   draft: EventCreationDraft;

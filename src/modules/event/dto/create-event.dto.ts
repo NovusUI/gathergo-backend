@@ -251,7 +251,7 @@ export class CreateEventDto {
   @ApiPropertyOptional({
     type: [CreateVolunteerRoleDto],
     description:
-      'Required for volunteer-only events. Also available for physical events with impact.',
+      'Required and available only for Volunteer and donation events, with a physical venue and impact story. Donations remain optional.',
   })
   @ValidateIf(
     (o: CreateEventDto) =>

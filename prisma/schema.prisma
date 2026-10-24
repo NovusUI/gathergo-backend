@@ -72,16 +72,82 @@ model User {
   impactReports               EventImpactReport[]
   volunteerApplications       EventVolunteer[]          @relation("VolunteerUser")
   confirmedVolunteerWork      EventVolunteer[]          @relation("VolunteerConfirmer")
+  badges                      UserBadge[]
+}
+
+enum BadgeCode {
+  FIRST_GATHER
+  FAMILIAR_FACE
+  HELPING_HAND
+  TIME_GIVER
+  GATHER_MAKER
+  IMPACT_STORYTELLER
+  FIRST_GIFT
+  COMMUNITY_BACKER
+  STEADY_GIVER
+}
+
+model UserBadge {
+  userId   String
+  code     BadgeCode
+  earnedAt DateTime?
+  isPublic Boolean   @default(false)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, code])
 }
 
 model UserPreference {
-  id           String   @id @default(uuid())
-  userId       String   @unique
-  eventTypes   String[]
-  interests    String[]
-  location     String?
-  primaryUsage String?
-  user         User     @relation(fields: [userId], references: [id])
+  id              String           @id @default(uuid())
+  userId          String           @unique
+  eventTypes      String[]
+  interests       String[]
+  location        String?
+  primaryUsage    String?
+  helpModes       String[]         @default([])
+  learningEnabled Boolean          @default(true)
+  learningSince   DateTime         @default(now())
+  signals         InterestSignal[]
+  eventFeedback   EventFeedback[]
+  user            User             @relation(fields: [userId], references: [id])
+}
+
+model InterestSignal {
+  id           String             @id @default(uuid())
+  preferenceId String
+  eventId      String
+  kind         InterestSignalKind
+  createdAt    DateTime           @default(now())
+  preference   UserPreference     @relation(fields: [preferenceId], references: [id], onDelete: Cascade)
+  event        Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([preferenceId, eventId, kind])
+  @@index([preferenceId, createdAt])
+}
+
+enum InterestSignalKind {
+  LIKE
+  VIEW
+}
+
+enum EventFeedbackRating {
+  LOVED
+  OKAY
+  NOT_FOR_ME
+}
+
+model EventFeedback {
+  id            String               @id @default(uuid())
+  preferenceId  String
+  eventId       String
+  rating        EventFeedbackRating?
+  moreLikeThis  Boolean              @default(false)
+  respondedAt   DateTime?
+  deferredUntil DateTime?
+  preference    UserPreference       @relation(fields: [preferenceId], references: [id], onDelete: Cascade)
+  event         Event                @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([preferenceId, eventId])
 }
 
 model UserFollow {
@@ -166,6 +232,8 @@ model Event {
   impactReport          EventImpactReport?
   volunteerRoles        VolunteerRole[]
   volunteers            EventVolunteer[]
+  interestSignals       InterestSignal[]
+  feedback              EventFeedback[]
 
   transactions TransactionReference[]
 

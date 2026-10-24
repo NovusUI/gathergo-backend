@@ -106,6 +106,18 @@ integration('checkout concurrency (isolated PostgreSQL)', () => {
   });
   beforeEach(async () => {
     jest.clearAllMocks();
+    paystack.initializeTransaction.mockImplementation(
+      (input: { reference: string }) =>
+        Promise.resolve({
+          status: true,
+          message: 'Initialized',
+          data: {
+            reference: input.reference,
+            authorization_url: `https://checkout.paystack.com/${input.reference}`,
+            access_code: 'test-access',
+          },
+        }),
+    );
     await prisma.checkoutFulfillmentJob.deleteMany();
     await prisma.checkoutRefund.deleteMany();
     users = await Promise.all(
@@ -334,6 +346,31 @@ integration('checkout concurrency (isolated PostgreSQL)', () => {
     await expect(checkout.cancel(first.id, users[2])).rejects.toThrow(
       'not found',
     );
+  });
+  it('lets the same buyer restart after cancellation with a fresh checkout key', async () => {
+    const originalKey = randomUUID();
+    const first = await start(users[1], { key: originalKey });
+    const cancelled = await payments.cancelCheckout(first.id, users[1]);
+    expect(cancelled).toMatchObject({
+      transactionId: first.id,
+      checkoutStatus: 'EXPIRED',
+      reservationStatus: 'CANCELLED',
+      paymentUrl: null,
+      reservationExpiresAt: null,
+    });
+    const replay = await start(users[1], { key: originalKey });
+    expect(replay.id).toBe(first.id);
+    expect(replay.reservation?.status).toBe('CANCELLED');
+
+    const retry = await start(users[1]);
+    expect(retry.id).not.toBe(first.id);
+    expect(retry.reservation?.status).toBe('HELD');
+    expect((await pay(retry)).status).toBe('SUCCESS');
+    expect(
+      await prisma.ticket.count({
+        where: { userId: users[1], eventTicketId: ticketId },
+      }),
+    ).toBe(1);
   });
   it('issues free tickets immediately and prevents concurrent overselling', async () => {
     await prisma.eventTicket.update({
@@ -566,18 +603,6 @@ integration('checkout concurrency (isolated PostgreSQL)', () => {
   });
   it('persists the provider checkout and replays it without extending the reservation', async () => {
     const key = randomUUID();
-    paystack.initializeTransaction.mockImplementation(
-      (input: { reference: string }) =>
-        Promise.resolve({
-          status: true,
-          message: 'Initialized',
-          data: {
-            reference: input.reference,
-            authorization_url: `https://checkout.paystack.com/${input.reference}`,
-            access_code: 'test-access',
-          },
-        }),
-    );
     const request = {
       items: [{ id: ticketId, ticketName: 'Client label', quantity: 1 }],
     };
@@ -600,6 +625,71 @@ integration('checkout concurrency (isolated PostgreSQL)', () => {
     expect((await checkout.get(first.transactionId)).initializationStatus).toBe(
       'READY',
     );
+  });
+
+  it('replaces an unpaid order with revised quantities and additional ticket types', async () => {
+    await prisma.eventTicket.update({
+      where: { id: ticketId },
+      data: { quantity: 10 },
+    });
+    const vip = await prisma.eventTicket.create({
+      data: {
+        eventId,
+        type: 'VIP',
+        description: '',
+        perks: [],
+        quantity: 10,
+        price: 2000,
+      },
+    });
+    const buyer = users[1];
+    const email = 'buyer@checkout.test';
+    const first = await payments.initiate(
+      buyer,
+      email,
+      { items: [{ id: ticketId, ticketName: 'General', quantity: 1 }] },
+      randomUUID(),
+    );
+    const revised = {
+      items: [
+        { id: ticketId, ticketName: 'General', quantity: 2 },
+        { id: vip.id, ticketName: 'VIP', quantity: 1 },
+      ],
+    };
+    const revisedKey = randomUUID();
+    await expect(
+      payments.initiate(buyer, email, revised, revisedKey),
+    ).rejects.toMatchObject({
+      response: { transactionId: first.transactionId },
+      status: 409,
+    });
+    await payments.cancelCheckout(first.transactionId, buyer);
+    const updated = await payments.initiate(buyer, email, revised, revisedKey);
+    expect(updated.transactionId).not.toBe(first.transactionId);
+    expect(updated.pricing.grossAmountKobo).toBe(400000);
+    expect(updated.paymentUrl).toBe(
+      `https://checkout.paystack.com/${updated.transactionId}`,
+    );
+    const original = await checkout.get(first.transactionId);
+    expect(original.reservation?.status).toBe('CANCELLED');
+    const current = await checkout.get(updated.transactionId);
+    expect(current.reservation?.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ eventTicketId: ticketId, quantity: 2 }),
+        expect.objectContaining({ eventTicketId: vip.id, quantity: 1 }),
+      ]),
+    );
+    expect((await pay(current)).status).toBe('SUCCESS');
+    expect(
+      await prisma.ticket.count({
+        where: { transactionId: updated.transactionId },
+      }),
+    ).toBe(3);
+    expect(
+      await prisma.ticket.count({
+        where: { transactionId: first.transactionId },
+      }),
+    ).toBe(0);
   });
 
   it('releases capacity after provider initialization fails and requires a fresh checkout key', async () => {

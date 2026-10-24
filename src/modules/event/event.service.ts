@@ -1,3 +1,5 @@
+import { UserPreferenceService } from '../user-preference/user-preference.service';
+import { rankPreferenceEvent } from '../user-preference/interest-profile';
 import {
   assertRegistrationCapacityEdit,
   assertTicketCapacityEdit,
@@ -72,6 +74,7 @@ export class EventService {
     private readonly queueService: CarpoolQueueService, // Injected
     private eventTicketService: EventTicketService,
     private mediaService: MediaService,
+    private readonly preferences: UserPreferenceService,
   ) {}
 
   private getLowestTicketPrice(event: {
@@ -932,171 +935,29 @@ export class EventService {
   }
 
   async getForYouEvents(userId: string) {
-    // ⏰ 24hr grace period
-    const nowMinus24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
-    // Get user preferences
-    const userPreference = await this.prisma.userPreference.findUnique({
-      where: { userId },
-    });
-
-    const preferredTags = userPreference?.eventTypes || [];
-    const preferredLocations = userPreference?.location || '';
-    const preferredInterests = userPreference?.interests || [];
-
-    const events: any[] = [];
-    const eventIds = new Set<string>();
-
-    /**
-     * 1️⃣ Events the user created
-     */
-    const createdEvents = await this.prisma.event.findMany({
-      where: {
-        creatorId: userId,
-        endDate: { gte: nowMinus24h },
-      },
+    const { profile, signals } = await this.preferences.rankingProfile(userId);
+    const events = await this.prisma.event.findMany({
+      where: { endDate: { gt: new Date() } },
       include: eventCardInclude,
+      orderBy: { startDate: 'asc' },
+      take: 200,
     });
-
-    for (const ev of createdEvents) {
-      if (!eventIds.has(ev.id)) {
-        events.push(ev);
-        eventIds.add(ev.id);
-      }
-    }
-
-    /**
-     * 2️⃣ Events the user registered for
-     */
-    const registrations = await this.prisma.registration.findMany({
-      where: { userId },
-      include: {
-        event: {
-          include: eventCardInclude,
-        },
-      },
-    });
-
-    const registeredEvents = registrations
-      .map((r) => r.event)
-      .filter(
-        (e): e is NonNullable<typeof e> => !!e && e.endDate >= nowMinus24h,
-      );
-
-    for (const ev of registeredEvents) {
-      if (!eventIds.has(ev.id)) {
-        events.push(ev);
-        eventIds.add(ev.id);
-      }
-    }
-
-    /**
-     * 3️⃣ Ticketed events
-     */
-    const tickets = await this.prisma.ticket.findMany({
-      where: { userId },
-      include: {
-        eventTicket: {
-          include: {
-            event: {
-              include: eventCardInclude,
-            },
-          },
-        },
-      },
-    });
-
-    const ticketedEvents = tickets
-      .map((t) => t.eventTicket?.event)
-      .filter(
-        (e): e is NonNullable<typeof e> => !!e && e.endDate >= nowMinus24h,
-      );
-
-    for (const ev of ticketedEvents) {
-      if (!eventIds.has(ev.id)) {
-        events.push(ev);
-        eventIds.add(ev.id);
-      }
-    }
-
-    /**
-     * 4️⃣ Preference-based events
-     */
-    if (events.length < 10) {
-      const preferenceEvents = await this.prisma.event.findMany({
-        where: {
-          endDate: { gte: nowMinus24h },
-          OR: [
-            { tags: { hasSome: preferredTags } },
-            { location: preferredLocations },
-            { tags: { hasSome: preferredInterests } },
-          ],
-        },
-        include: eventCardInclude,
-        take: 20,
-      });
-
-      for (const ev of preferenceEvents) {
-        if (!eventIds.has(ev.id) && events.length < 10) {
-          events.push(ev);
-          eventIds.add(ev.id);
-        }
-      }
-    }
-
-    /**
-     * 5️⃣ Fallback events
-     */
-    if (events.length < 10) {
-      const fallbackEvents = await this.prisma.event.findMany({
-        where: { endDate: { gte: nowMinus24h } },
-        include: eventCardInclude,
-        orderBy: { startDate: 'asc' },
-        take: 20,
-      });
-
-      for (const ev of fallbackEvents) {
-        if (!eventIds.has(ev.id) && events.length < 10) {
-          events.push(ev);
-          eventIds.add(ev.id);
-        }
-      }
-    }
-
-    /**
-     * 6️⃣ Add reasons
-     */
-    const eventResults = events.map((event) => {
-      let reason = 'Recommended';
-
-      if (createdEvents.find((e) => e.id === event.id)) {
-        reason = 'You created this event';
-      } else if (registeredEvents.find((e) => e.id === event.id)) {
-        reason = 'You registered for this event';
-      } else if (ticketedEvents.find((e) => e.id === event.id)) {
-        reason = 'You already have tickets for this event';
-      } else if (
-        (preferredTags.length &&
-          event.tags.some((tag) => preferredTags.includes(tag))) ||
-        (preferredInterests.length &&
-          event.tags.some((tag) => preferredInterests.includes(tag))) ||
-        (preferredLocations.length &&
-          preferredLocations.includes(event.location))
-      ) {
-        reason = 'Based on your preferences';
-      } else {
-        reason = 'Popular or upcoming event';
-      }
-
-      return { ...event, reason };
-    });
-
-    const eventsWithPricing = eventResults.map((event) => ({
-      ...event,
-      lowestTicketPrice: this.getLowestTicketPrice(event),
-    }));
-
-    return eventsWithPricing.slice(0, 10); // ensure max 10
+    return events
+      .map((event) => ({
+        event,
+        ...rankPreferenceEvent(event, profile, signals),
+      }))
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          a.event.startDate.getTime() - b.event.startDate.getTime(),
+      )
+      .slice(0, 10)
+      .map(({ event, reason }) => ({
+        ...event,
+        reason,
+        lowestTicketPrice: this.getLowestTicketPrice(event),
+      }));
   }
 
   async getAllUserEvents(userId: string, page = 1, pageSize = 10) {

@@ -5,7 +5,6 @@ export type EventCreationUpdates = Partial<
     CreateEventDto,
     | 'title'
     | 'description'
-    | 'impactTitle'
     | 'impactDescription'
     | 'isPhysicalEvent'
     | 'location'
@@ -22,8 +21,11 @@ export type EventCreationUpdates = Partial<
 >;
 
 export type EventCreationDraft = EventCreationUpdates & {
+  registrationType: CreateEventDto['registrationType'];
   ticketCount: number;
   volunteerRoleCount: number;
+  impactMapCount: number;
+  hasImpactGoalOrPath: boolean;
 };
 
 export type EventCreationMessage = {
@@ -36,13 +38,25 @@ export type EventCreationSection =
   | 'Location'
   | 'Pricing'
   | 'Story'
-  | 'Volunteering'
   | 'Cover'
-  | 'Links';
+  | EventCreationOptionalSection;
+
+export const EVENT_CREATION_OPTIONAL_SECTIONS = [
+  'Impact story',
+  'Impact map',
+  'Volunteering',
+  'Links',
+  'Interests',
+] as const;
+
+export type EventCreationOptionalSection =
+  (typeof EVENT_CREATION_OPTIONAL_SECTIONS)[number];
 
 export interface EventCreationAssistantReply {
   reply: string;
   choices: string[];
   section: EventCreationSection | 'Review' | null;
+  completedSection: EventCreationOptionalSection | null;
+  suggestedImpactStory: string | null;
   updates: EventCreationUpdates;
 }

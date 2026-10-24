@@ -38,6 +38,7 @@ import { WalletModule } from './modules/wallet/wallet.module';
 import { validateEnvironment } from './config/runtime-env';
 import { GogoModule } from './modules/gogo/gogo.module';
 import { VolunteerModule } from './modules/volunteer/volunteer.module';
+import { BadgeModule } from './modules/badge/badge.module';
 
 @Module({
   imports: [
@@ -80,6 +81,7 @@ import { VolunteerModule } from './modules/volunteer/volunteer.module';
     WalletModule,
     GogoModule,
     VolunteerModule,
+    BadgeModule,
   ],
   controllers: [AppController],
   providers: [AppService, PrismaService, RateLimitGuard],
