@@ -56,14 +56,14 @@ export class EventCreationAssistantDto {
       'Optional steps the organiser has finished or explicitly skipped.',
   })
   @IsArray()
-  @ArrayMaxSize(5)
+  @ArrayMaxSize(EVENT_CREATION_OPTIONAL_SECTIONS.length)
   @ArrayUnique()
   @IsIn(EVENT_CREATION_OPTIONAL_SECTIONS, { each: true })
   addressedSections: EventCreationOptionalSection[];
 
   @ApiProperty({
     description:
-      'The current editable event draft, including the selected participation type and required hasImpactGoalOrPath flag for a selected global goal or impact path. Donation targets are in kobo; registration fees are in naira.',
+      'The current editable event draft, including the selected participation type, required hasImpactGoalOrPath flag for a selected global goal or impact path, and required hasCoverImage flag for a selected cover. Image data and local image URIs are not included. Donation targets are in kobo; registration fees are in naira.',
   })
   @IsObject()
   draft: EventCreationDraft;

@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional, PickType } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
@@ -374,7 +374,9 @@ export class WalletKycDto {
   @ApiProperty({ example: false })
   canSubmitFullKyc: boolean;
 
-  @ApiPropertyOptional({ example: 'Payout account name partially matches verified identity' })
+  @ApiPropertyOptional({
+    example: 'Payout account name partially matches verified identity',
+  })
   nameMatchReason?: string | null;
 }
 
@@ -624,6 +626,12 @@ export class WalletSettlementsQueryDto {
 }
 
 export class InternalKycQueueQueryDto {
+  @ApiPropertyOptional({ description: 'Filter to one creator user ID' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  userId?: string;
+
   @ApiPropertyOptional({ example: 1, default: 1 })
   @Type(() => Number)
   @IsOptional()
@@ -672,6 +680,12 @@ export class InternalKycQueueQueryDto {
 }
 
 export class InternalAlatQueueQueryDto {
+  @ApiPropertyOptional({ description: 'Filter to one creator user ID' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  userId?: string;
+
   @ApiPropertyOptional({ example: 1, default: 1 })
   @Type(() => Number)
   @IsOptional()
@@ -968,7 +982,41 @@ export class UpsertAlatProfileDto {
   notes?: string;
 }
 
+export class InternalSettlementQueueQueryDto extends PickType(
+  WalletSettlementsQueryDto,
+  ['page', 'pageSize'] as const,
+) {
+  @ApiPropertyOptional({ description: 'Creator ID, name, username or email' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(150)
+  search?: string;
+}
+
+export class InternalSettlementsQueryDto extends WalletSettlementsQueryDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  creatorId?: string;
+}
+
 export class CreateSettlementDto {
+  @ApiPropertyOptional({
+    description: 'Net payable in kobo from the reviewed preview',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  expectedAmountKobo?: number;
+
+  @ApiPropertyOptional({
+    description: 'Eligible payment count from the reviewed preview',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  expectedTransactionCount?: number;
+
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()

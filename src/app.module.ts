@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ShortLinksModule } from './modules/short-links/short-links.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './modules/auth/auth.module';
@@ -39,6 +40,7 @@ import { validateEnvironment } from './config/runtime-env';
 import { GogoModule } from './modules/gogo/gogo.module';
 import { VolunteerModule } from './modules/volunteer/volunteer.module';
 import { BadgeModule } from './modules/badge/badge.module';
+import { DashboardAuthModule } from './modules/dashboard-auth/dashboard-auth.module';
 
 @Module({
   imports: [
@@ -49,6 +51,8 @@ import { BadgeModule } from './modules/badge/badge.module';
     }),
     ScheduleModule.forRoot(),
     PrismaModule,
+    ShortLinksModule,
+    DashboardAuthModule,
     AuthModule,
     UserModule,
     UserPreferenceModule,

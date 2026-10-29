@@ -11,6 +11,7 @@ import { CreateDonationDto } from './dto/create-donation.dto';
 import { NotificationService } from '../notification/notification.service';
 import { notificationConstants } from 'src/common/constants';
 import { FeedIntegrationService } from '../feed/feed-integration.service';
+import { FoodBankService } from '../food-bank/food-bank.service';
 import { MailService } from '../mail/mail.service';
 
 @Injectable()
@@ -22,6 +23,7 @@ export class DonationService {
     private readonly notificationService: NotificationService,
     private readonly feedIntegrationService: FeedIntegrationService,
     private readonly mailService: MailService,
+    private readonly foodBank: FoodBankService,
   ) {}
 
   async createDonation(
@@ -50,41 +52,52 @@ export class DonationService {
     }
 
     // Create donation in transaction to update total
-    const result = await this.prisma.$transaction(async (tx) => {
-      // Create donation
-      const donation = await tx.donation.create({
-        data: {
-          userId,
-          eventId,
-          amount,
-          message,
-          isAnonymous: isAnonymous || false,
-          transactionId,
-          status: 'completed', // assuming payment already verified
-        },
-        include: {
-          user: {
-            select: {
-              id: true,
-              fullName: true,
-              username: true,
-              email: true,
-              profilePicUrl: true,
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        // Serialize payment fulfillment so duplicate callbacks cannot duplicate a donation.
+        await tx.$queryRaw`SELECT "id" FROM "TransactionReference" WHERE "id" = ${transactionId} FOR UPDATE`;
+        const existing = await tx.donation.findFirst({
+          where: { transactionId },
+          include: { user: true, event: true },
+        });
+        if (existing) return { donation: existing, created: false };
+        const donation = await tx.donation.create({
+          data: {
+            userId,
+            eventId,
+            amount,
+            message,
+            isAnonymous: isAnonymous || false,
+            transactionId,
+            status: 'completed', // assuming payment already verified
+          },
+          include: {
+            user: {
+              select: {
+                id: true,
+                fullName: true,
+                username: true,
+                email: true,
+                profilePicUrl: true,
+              },
+            },
+            event: {
+              select: {
+                id: true,
+                title: true,
+              },
             },
           },
-          event: {
-            select: {
-              id: true,
-              title: true,
-            },
-          },
-        },
-      });
+        });
 
-      // Update event total donations
-
-      return donation;
-    });
+        if (event.registrationType === 'foodbank')
+          await this.foodBank.grantForDonation(tx, userId, eventId);
+        return { donation, created: true };
+      },
+      { maxWait: 10000, timeout: 15000 },
+    );
+    const { donation: saved, created } = result;
+    if (!created) return this.formatDonationResponse(saved);
     this.notificationService
       .createNotification({
         recipientIds: [event.creatorId],
@@ -107,16 +120,17 @@ export class DonationService {
       .onDonationMade(
         eventId,
         userId,
-        result.id,
+        saved.id,
         amount,
         isAnonymous,
         message,
+        createDonationDto.source,
       )
       .then(() => {});
 
-    await this.queueDonationConfirmationEmail(result);
+    await this.queueDonationConfirmationEmail(saved);
 
-    return this.formatDonationResponse(result);
+    return this.formatDonationResponse(saved);
   }
 
   async getEventDonations(eventId: string) {

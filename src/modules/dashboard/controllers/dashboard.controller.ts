@@ -1,4 +1,9 @@
-import { Controller, Get, Headers, Query, UseGuards } from '@nestjs/common';
+import {
+  CurrentDashboard,
+  DashboardAccess,
+} from 'src/modules/dashboard-auth/dashboard-access';
+import type { DashboardSessionContext } from 'src/modules/dashboard-auth/dashboard-auth.types';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -6,7 +11,6 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { Public } from 'src/common/decorators/public.decorator';
 import { JwtAuthGuard } from 'src/common/guards/jwt-auth.guard';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { DashboardService } from '../services/dashboard.service';
@@ -55,14 +59,14 @@ export class DashboardController {
   }
 
   @Get('internal/overview')
-  @Public()
+  @DashboardAccess('read')
   @ApiOperation({ summary: 'Internal admin overview endpoint' })
   async getInternalOverview(
-    @Headers('x-ops-key') opsKey: string,
+    @CurrentDashboard() session: DashboardSessionContext,
     @Query() dto: InternalAdminOverviewQueryDto,
   ) {
     return {
-      data: await this.dashboardService.getInternalOverview(dto, opsKey),
+      data: await this.dashboardService.getInternalOverview(dto, session.user),
     };
   }
 }

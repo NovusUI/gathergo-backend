@@ -1,4 +1,9 @@
 import {
+  CurrentDashboard,
+  DashboardAccess,
+} from 'src/modules/dashboard-auth/dashboard-access';
+import type { DashboardSessionContext } from 'src/modules/dashboard-auth/dashboard-auth.types';
+import {
   Body,
   Controller,
   Get,
@@ -24,6 +29,8 @@ import {
   CreateSettlementDto,
   InternalAlatQueueQueryDto,
   InternalKycQueueQueryDto,
+  InternalSettlementQueueQueryDto,
+  InternalSettlementsQueryDto,
   PersonalLivenessDto,
   NotifyOnKycResolutionDto,
   ReviewKycDto,
@@ -81,7 +88,9 @@ export class WalletController {
   }
 
   @Get('banks')
-  @ApiOperation({ summary: 'Get available Nigerian payout banks from Paystack' })
+  @ApiOperation({
+    summary: 'Get available Nigerian payout banks from Paystack',
+  })
   async getBanks() {
     return this.walletService.getBanks();
   }
@@ -193,51 +202,51 @@ export class WalletController {
   }
 
   @Post('internal/payout-profile/:userId/review')
-  @Public()
+  @DashboardAccess('admin')
   @ApiOperation({ summary: 'Internal payout-profile review endpoint' })
   @ApiParam({ name: 'userId', description: 'Creator user ID' })
   async reviewPayoutProfile(
     @Param('userId') userId: string,
-    @Headers('x-ops-key') opsKey: string,
+    @CurrentDashboard() session: DashboardSessionContext,
     @Body() dto: ReviewPayoutProfileDto,
   ) {
-    return this.walletService.reviewPayoutProfile(userId, dto, opsKey);
+    return this.walletService.reviewPayoutProfile(userId, dto, session.user);
   }
 
   @Get('internal/kyc-queue')
-  @Public()
+  @DashboardAccess('read')
   @ApiOperation({ summary: 'Internal KYC review queue endpoint' })
   async getInternalKycQueue(
-    @Headers('x-ops-key') opsKey: string,
+    @CurrentDashboard() session: DashboardSessionContext,
     @Query() dto: InternalKycQueueQueryDto,
   ) {
     return {
-      data: await this.walletService.getInternalKycQueue(dto, opsKey),
+      data: await this.walletService.getInternalKycQueue(dto, session.user),
     };
   }
 
   @Get('internal/alat-queue')
-  @Public()
+  @DashboardAccess('read')
   @ApiOperation({ summary: 'Internal ALAT setup queue endpoint' })
   async getInternalAlatQueue(
-    @Headers('x-ops-key') opsKey: string,
+    @CurrentDashboard() session: DashboardSessionContext,
     @Query() dto: InternalAlatQueueQueryDto,
   ) {
     return {
-      data: await this.walletService.getInternalAlatQueue(dto, opsKey),
+      data: await this.walletService.getInternalAlatQueue(dto, session.user),
     };
   }
 
   @Post('internal/kyc/:userId/review')
-  @Public()
+  @DashboardAccess('admin')
   @ApiOperation({ summary: 'Internal KYC review endpoint' })
   @ApiParam({ name: 'userId', description: 'Creator user ID' })
   async reviewKyc(
     @Param('userId') userId: string,
-    @Headers('x-ops-key') opsKey: string,
+    @CurrentDashboard() session: DashboardSessionContext,
     @Body() dto: ReviewKycDto,
   ) {
-    return this.walletService.reviewKyc(userId, dto, opsKey);
+    return this.walletService.reviewKyc(userId, dto, session.user);
   }
 
   @Post('webhooks/dikript')
@@ -272,38 +281,79 @@ export class WalletController {
   }
 
   @Post('internal/alat-profile/:userId')
-  @Public()
+  @DashboardAccess('admin')
   @ApiOperation({ summary: 'Internal ALAT profile upsert endpoint' })
   @ApiParam({ name: 'userId', description: 'Creator user ID' })
   async upsertAlatProfile(
     @Param('userId') userId: string,
-    @Headers('x-ops-key') opsKey: string,
+    @CurrentDashboard() session: DashboardSessionContext,
     @Body() dto: UpsertAlatProfileDto,
   ) {
-    return this.walletService.upsertAlatProfile(userId, dto, opsKey);
+    return this.walletService.upsertAlatProfile(userId, dto, session.user);
+  }
+
+  @Get('internal/settlement-queue')
+  @DashboardAccess('read')
+  @ApiOperation({ summary: 'List calculated creator settlement balances' })
+  async getInternalSettlementQueue(
+    @CurrentDashboard() session: DashboardSessionContext,
+    @Query() dto: InternalSettlementQueueQueryDto,
+  ) {
+    return {
+      data: await this.walletService.getInternalSettlementQueue(
+        dto,
+        session.user,
+      ),
+    };
+  }
+
+  @Get('internal/settlements')
+  @DashboardAccess('read')
+  @ApiOperation({ summary: 'List platform settlement records' })
+  async getInternalSettlements(
+    @CurrentDashboard() session: DashboardSessionContext,
+    @Query() dto: InternalSettlementsQueryDto,
+  ) {
+    return this.walletService.getInternalSettlements(dto, session.user);
+  }
+
+  @Get('internal/settlements/:creatorId/preview')
+  @DashboardAccess('read')
+  @ApiOperation({
+    summary: 'Calculate currently eligible payments and net creator settlement',
+  })
+  async previewSettlement(
+    @Param('creatorId') creatorId: string,
+    @CurrentDashboard() session: DashboardSessionContext,
+  ) {
+    return this.walletService.previewSettlement(creatorId, session.user);
   }
 
   @Post('internal/settlements/:creatorId')
-  @Public()
+  @DashboardAccess('admin')
   @ApiOperation({ summary: 'Internal settlement creation endpoint' })
   @ApiParam({ name: 'creatorId', description: 'Creator user ID' })
   async createSettlement(
     @Param('creatorId') creatorId: string,
-    @Headers('x-ops-key') opsKey: string,
+    @CurrentDashboard() session: DashboardSessionContext,
     @Body() dto: CreateSettlementDto,
   ) {
-    return this.walletService.createSettlement(creatorId, dto, opsKey);
+    return this.walletService.createSettlement(creatorId, dto, session.user);
   }
 
   @Post('internal/settlements/:settlementId/complete')
-  @Public()
+  @DashboardAccess('admin')
   @ApiOperation({ summary: 'Internal settlement completion endpoint' })
   @ApiParam({ name: 'settlementId', description: 'Settlement record ID' })
   async completeSettlement(
     @Param('settlementId') settlementId: string,
-    @Headers('x-ops-key') opsKey: string,
+    @CurrentDashboard() session: DashboardSessionContext,
     @Body() dto: CompleteSettlementDto,
   ) {
-    return this.walletService.completeSettlement(settlementId, dto, opsKey);
+    return this.walletService.completeSettlement(
+      settlementId,
+      dto,
+      session.user,
+    );
   }
 }

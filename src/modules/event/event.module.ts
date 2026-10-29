@@ -10,5 +10,6 @@ import { MediaService } from '../media/media.service';
   imports: [CarpoolQueueModule, UserPreferenceModule],
   controllers: [EventController],
   providers: [EventService, EventTicketService, MediaService],
+  exports: [EventService],
 })
 export class EventModule {}

@@ -14,15 +14,18 @@ describe('notification sound selection', () => {
     );
   });
 
-  it('uses the rejection sound only for a rejected request', () => {
-    expect(
-      getNotificationSound(
-        notificationConstants.CARPOOL_NOTIFICATION_TYPE_REJECTED,
-      ),
-    ).toBe(NOTIFICATION_SOUNDS.carpoolRejection);
+  it.each([
+    notificationConstants.CARPOOL_NOTIFICATION_TYPE_REJECTED,
+    notificationConstants.CARPOOL_NOTIFICATION_TYPE_REMOVED,
+  ])('uses the rejection sound for %s', (type) => {
+    expect(getNotificationSound(type)).toBe(
+      NOTIFICATION_SOUNDS.carpoolRejection,
+    );
+  });
+
+  it('keeps cancellations and voluntary departures on the general sound', () => {
     for (const type of [
       notificationConstants.CARPOOL_NOTIFICATION_TYPE_CANCELLED,
-      notificationConstants.CARPOOL_NOTIFICATION_TYPE_REMOVED,
       notificationConstants.CARPOOL_NOTIFICATION_TYPE_LEFT,
       'carpool_update',
     ])

@@ -57,6 +57,7 @@ export class NotificationGateway extends BaseGateway {
 
     try {
       await this.notificationService.markAllAsRead(userId);
+      client.emit('allNotificationsRead');
       const tray = await this.notificationService.getNotificationTray(userId);
       client.emit('notificationTray', tray);
     } catch (error) {

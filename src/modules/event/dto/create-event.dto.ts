@@ -8,9 +8,11 @@ import {
   IsEnum,
   IsNotEmpty,
   IsNumber,
+  IsInt,
   IsOptional,
   IsString,
   IsUrl,
+  IsTimeZone,
   ValidateIf,
   ValidateNested,
   Max,
@@ -196,6 +198,44 @@ export class CreateEventDto {
   @IsOptional()
   @IsString()
   communityId?: string;
+
+  @ApiPropertyOptional({ minimum: 1 })
+  @ValidateIf(
+    (o: CreateEventDto) =>
+      o.registrationType === 'foodbank' || o.foodBankTotalMeals !== undefined,
+  )
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(1000000)
+  foodBankTotalMeals?: number;
+
+  @ApiPropertyOptional({ minimum: 1 })
+  @ValidateIf(
+    (o: CreateEventDto) =>
+      o.registrationType === 'foodbank' || o.foodBankSlotCapacity !== undefined,
+  )
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  foodBankSlotCapacity?: number;
+
+  @ApiPropertyOptional({ minimum: 5, maximum: 120 })
+  @ValidateIf(
+    (o: CreateEventDto) =>
+      o.registrationType === 'foodbank' || o.foodBankSlotMinutes !== undefined,
+  )
+  @Type(() => Number)
+  @IsInt()
+  @Min(5)
+  @Max(120)
+  foodBankSlotMinutes?: number;
+
+  @ApiPropertyOptional({ description: 'IANA timezone for the collection day' })
+  @IsOptional()
+  @IsTimeZone()
+  foodBankTimeZone?: string;
 
   // ✅ Registration type
   @ApiProperty({ enum: RegistrationType })

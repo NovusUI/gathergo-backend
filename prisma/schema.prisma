@@ -8,6 +8,48 @@ datasource db {
   shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
 }
 
+enum DashboardRole {
+  USER
+  ADMIN
+}
+
+enum DashboardAccountStatus {
+  ACTIVE
+  DISABLED
+}
+
+model DashboardUser {
+  id                  String                 @id @default(uuid())
+  username            String                 @unique
+  fullName            String
+  passwordHash        String
+  role                DashboardRole          @default(USER)
+  status              DashboardAccountStatus @default(ACTIVE)
+  mustChangePassword  Boolean                @default(true)
+  failedLoginAttempts Int                    @default(0)
+  lockedUntil         DateTime?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+  createdById         String?
+  createdBy           DashboardUser?         @relation("DashboardAccountCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAccounts     DashboardUser[]        @relation("DashboardAccountCreator")
+  sessions            DashboardSession[]
+
+  @@index([role, status])
+}
+
+model DashboardSession {
+  id        String        @id @default(uuid())
+  tokenHash String        @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime      @default(now())
+  user      DashboardUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([expiresAt])
+}
+
 model User {
   id                          String                    @id @default(uuid())
   email                       String                    @unique
@@ -49,6 +91,7 @@ model User {
   Post                        Post[]
   Registration                Registration[]
   Ticket                      Ticket[]
+  mealPasses                  MealPass[]
   Donation                    Donation[]
   buyerTransactions           TransactionReference[]    @relation("BuyerTransactions")
   creatorTransactions         TransactionReference[]    @relation("CreatorTransactions")
@@ -187,6 +230,13 @@ model CommunityFollow {
   @@unique([userId, communityId])
 }
 
+enum FoodBankCollectionStatus {
+  NOT_STARTED
+  OPEN
+  PAUSED
+  CLOSED
+}
+
 model Event {
   id                    String             @id @default(uuid())
   title                 String
@@ -218,6 +268,12 @@ model Event {
   donationsEnabled      Boolean            @default(false)
   impactMapSentAt       DateTime?
   thumbnailUrl          String?
+  foodBankTotalMeals    Int?
+  foodBankSlotCapacity  Int?
+  foodBankSlotMinutes   Int?
+  foodBankCollectionStatus FoodBankCollectionStatus @default(NOT_STARTED)
+  foodBankTimeZone       String @default("Africa/Lagos")
+  mealPasses            MealPass[]
   registrationType      RegistrationType
   carpools              Carpool[]
   community             Community?         @relation("CommunityEvents", fields: [communityId], references: [id])
@@ -366,6 +422,25 @@ model Registration {
 
   @@index([transactionId])
   @@index([eventId, userId, status])
+}
+
+model MealPass {
+  id              String   @id @default(uuid())
+  userId          String
+  eventId         String
+  qrCode          String   @unique
+  collectionStart DateTime
+  collectionEnd   DateTime
+  isUsed          Boolean  @default(false)
+  collectedAt     DateTime?
+  collectedBy     String?
+  createdAt       DateTime @default(now())
+  event           Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, userId])
+  @@index([eventId, collectionStart])
+  @@index([userId])
 }
 
 model Donation {
@@ -830,6 +905,7 @@ enum Gender {
 }
 
 enum RegistrationType {
+  foodbank
   ticket
   registration
   donation
@@ -1042,4 +1118,19 @@ model ScanLog {
   @@index([qrCode])
   @@index([scannedById])
   @@index([createdAt])
+}
+
+enum ShortLinkKind {
+  event
+  foodbank
+  carpool
+}
+
+model ShortLink {
+  code      String        @id
+  kind      ShortLinkKind
+  targetId  String
+  createdAt DateTime      @default(now())
+
+  @@unique([kind, targetId])
 }

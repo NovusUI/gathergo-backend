@@ -30,6 +30,7 @@ describe('Gogo creation endpoint', () => {
       volunteerRoleCount: 0,
       impactMapCount: 0,
       hasImpactGoalOrPath: false,
+      hasCoverImage: false,
     },
     addressedSections: [],
     messages: [{ role: 'user', content: 'A park day' }],
@@ -117,6 +118,7 @@ describe('Gogo creation endpoint', () => {
             location: 'Lagos park',
             registrationFee: 0,
             registrationAttendees: 25,
+            hasCoverImage: true,
             links: ['https://www.example.com/event'],
             tags: ['Nature'],
           },
@@ -150,6 +152,24 @@ describe('Gogo creation endpoint', () => {
       .send(payload)
       .expect(403);
     expect(reply).not.toHaveBeenCalled();
+  });
+  it('accepts all optional steps, including a skipped cover', async () => {
+    const addressedSections = [
+      'Impact story',
+      'Impact map',
+      'Volunteering',
+      'Links',
+      'Interests',
+      'Cover',
+    ];
+    await request(app.getHttpServer())
+      .post('/api/v1/events/creation-assistant')
+      .send({
+        ...payload,
+        addressedSections,
+      })
+      .expect(201);
+    expect(reply).toHaveBeenCalledWith({ ...payload, addressedSections });
   });
   it.each([
     { ...payload, eventType: 'volunteer' },

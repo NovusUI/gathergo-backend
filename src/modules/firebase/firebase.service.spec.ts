@@ -38,6 +38,7 @@ describe('Gogo sounds through direct FCM delivery', () => {
     ['carpool_request', false],
     ['carpool_accepted_request', false],
     ['carpool_rejected_request', false],
+    ['carpool_removed', false],
     ['FEED_FRENZY_TICKET_HIGH', false],
     ['FEED_DONATION_100_PERCENT', true],
     ['event_donation', false],

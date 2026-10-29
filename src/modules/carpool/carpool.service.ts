@@ -69,6 +69,8 @@ interface RankedCarpoolRow {
   eventImageUrl: string | null;
   acceptedPassengers: number;
   isFollowedOwner: boolean;
+  isFollowedByDriver: boolean;
+  isMember: boolean;
   distanceKm: number | null;
 }
 
@@ -406,30 +408,23 @@ export class CarpoolService {
       throw new NotFoundException('Carpool not found');
     }
 
-    // ✅ Check if requester follows driver
-    const isFollowingDriver = await this.prisma.userFollow.findUnique({
-      where: {
-        followerId_followingId: {
-          followerId: currentUserId,
-          followingId: carpool.driverId,
-        },
-      },
-    });
-
-    // ✅ Check if driver follows requester
-    const isFollowedByDriver = await this.prisma.userFollow.findUnique({
-      where: {
-        followerId_followingId: {
-          followerId: carpool.driverId,
-          followingId: currentUserId,
-        },
-      },
-    });
+    const { following, followers } = await this.getFollowRelationships(
+      currentUserId,
+      [
+        carpool.driverId,
+        ...carpool.passengers.map((passenger) => passenger.userId),
+      ],
+    );
 
     return {
       ...carpool,
-      isFollowingDriver: Boolean(isFollowingDriver),
-      isFollowedByDriver: Boolean(isFollowedByDriver),
+      isFollowingDriver: following.has(carpool.driverId),
+      isFollowedByDriver: followers.has(carpool.driverId),
+      passengers: carpool.passengers.map((passenger) => ({
+        ...passenger,
+        isFollowingRequester: following.has(passenger.userId),
+        isFollowedByRequester: followers.has(passenger.userId),
+      })),
     };
   }
 
@@ -647,10 +642,12 @@ export class CarpoolService {
     });
 
     if (existing) {
-      return {
-        message: 'you already requested this ride',
-        carpool: existing,
-      };
+      if (existing.status === 'REMOVED') {
+        throw new ForbiddenException(
+          'You were removed from this ride and cannot request it again',
+        );
+      }
+      throw new BadRequestException('You already requested this ride');
     }
 
     // Limit active requests
@@ -921,6 +918,16 @@ export class CarpoolService {
         link: '/chat/' + request.carpoolId,
         imageUrl: request.carpool.event?.thumbnailUrl ?? '',
       });
+      await this.pubsubService.publishCarpoolUpdate(
+        'passenger_added',
+        request.carpoolId,
+        {
+          id: request.userId,
+          profilePicUrlTN: request.user.profilePicUrlTN,
+          status: 'ACCEPTED',
+        },
+        request.userId,
+      );
     } else {
       await this.prisma.carpoolPassenger.update({
         where: { id: request.id },
@@ -938,13 +945,9 @@ export class CarpoolService {
         imageUrl: request.carpool.event?.thumbnailUrl ?? '',
       });
       await this.pubsubService.publishCarpoolUpdate(
-        'passenger_added',
+        'carpool_updated',
         request.carpoolId,
-        {
-          id: request.userId,
-          avatar: request.user.profilePicUrlTN,
-          status: 'ACCEPTED',
-        },
+        {},
         request.userId,
       );
     }
@@ -1028,6 +1031,12 @@ export class CarpoolService {
     if (passenger.carpool.driverId !== driverId) {
       throw new ForbiddenException(
         'You are not authorized to remove passengers from this carpool',
+      );
+    }
+
+    if (passenger.status !== 'ACCEPTED') {
+      throw new BadRequestException(
+        'Only an accepted passenger can be removed',
       );
     }
 
@@ -1311,7 +1320,7 @@ export class CarpoolService {
   }
 
   async getPaginatedEventCarpools(
-    userId: string,
+    userId: string | null,
     eventId: string,
     query: EventCarpoolQueryDto,
   ) {
@@ -1325,6 +1334,11 @@ export class CarpoolService {
     } = query;
     const hasCoordinates = latitude != null && longitude != null;
     const selectedFilter = filter ?? EventCarpoolFilter.ALL;
+    if (userId === null && selectedFilter === EventCarpoolFilter.FOLLOWED) {
+      throw new BadRequestException(
+        'Dashboard accounts do not have following-based carpool ranking.',
+      );
+    }
     const skip = (page - 1) * pageSize;
     const maxDistanceMeters = maxDistanceKm * 1000;
 
@@ -1429,6 +1443,21 @@ export class CarpoolService {
             AND cp.status = 'ACCEPTED'
         ) AS "acceptedPassengers",
         (uf.id IS NOT NULL) AS "isFollowedOwner",
+        EXISTS (
+          SELECT 1 FROM "UserFollow" follower
+          WHERE follower."followerId" = c."driverId"
+            AND follower."followingId" = $1
+        ) AS "isFollowedByDriver",
+        (
+          $1 IS NOT NULL AND (
+            c."driverId" = $1 OR EXISTS (
+              SELECT 1 FROM "CarpoolPassenger" membership
+              WHERE membership."carpoolId" = c.id
+                AND membership."userId" = $1
+                AND membership.status = 'ACCEPTED'
+            )
+          )
+        ) AS "isMember",
         CASE
           WHEN $3::boolean = true AND c."startPoint" IS NOT NULL
             THEN ST_DistanceSphere(
@@ -1515,6 +1544,9 @@ export class CarpoolService {
         distanceKm: row.distanceKm,
         isCloseToYou,
         isFollowedOwner: row.isFollowedOwner,
+        isFollowingDriver: row.isFollowedOwner,
+        isFollowedByDriver: row.isFollowedByDriver,
+        isMember: row.isMember,
         ranking: {
           priority,
           primaryReason,
@@ -1555,8 +1587,6 @@ export class CarpoolService {
     startOfToday.setHours(0, 0, 0, 0);
     const maxResults = 10;
 
-    const allCarpools: any[] = [];
-
     // 1️⃣ Already involved carpools
     const involvedCarpools = await this.prisma.carpool.findMany({
       where: {
@@ -1596,7 +1626,7 @@ export class CarpoolService {
       },
     });
 
-    allCarpools.push(...involvedCarpools);
+    const allCarpools = [...involvedCarpools];
 
     // Collect existing IDs to avoid repetition
     const existingIds = new Set(involvedCarpools.map((c) => c.id));
@@ -1702,7 +1732,58 @@ export class CarpoolService {
       }
     }
 
-    return allCarpools.slice(0, maxResults);
+    const carpools = allCarpools.slice(0, maxResults);
+    const { following, followers } = await this.getFollowRelationships(
+      userId,
+      carpools.map((carpool) => carpool.driverId),
+    );
+
+    return carpools.map((carpool) => ({
+      ...carpool,
+      isFollowingDriver: following.has(carpool.driverId),
+      isFollowedByDriver: followers.has(carpool.driverId),
+      isMember: this.isCarpoolMember(carpool, userId),
+    }));
+  }
+
+  private async getFollowRelationships(userId: string, otherUserIds: string[]) {
+    const userIds = [...new Set(otherUserIds)].filter((id) => id !== userId);
+    const relationships = userIds.length
+      ? await this.prisma.userFollow.findMany({
+          where: {
+            OR: [
+              { followerId: userId, followingId: { in: userIds } },
+              { followerId: { in: userIds }, followingId: userId },
+            ],
+          },
+          select: { followerId: true, followingId: true },
+        })
+      : [];
+    const following = new Set(
+      relationships
+        .filter((follow) => follow.followerId === userId)
+        .map((follow) => follow.followingId),
+    );
+    const followers = new Set(
+      relationships
+        .filter((follow) => follow.followingId === userId)
+        .map((follow) => follow.followerId),
+    );
+
+    return { following, followers };
+  }
+
+  private isCarpoolMember(
+    carpool: Pick<CarpoolWithDetails, 'driverId' | 'passengers'>,
+    userId: string,
+  ) {
+    return (
+      carpool.driverId === userId ||
+      carpool.passengers.some(
+        (passenger) =>
+          passenger.userId === userId && passenger.status === 'ACCEPTED',
+      )
+    );
   }
 
   // New method for chat access details
@@ -1719,11 +1800,7 @@ export class CarpoolService {
     const isExpired = carpool.expiresAt && new Date(carpool.expiresAt) < now;
     const isActive = carpool.status === 'ACTIVE' && !isExpired;
 
-    const isDriver = carpool.driverId === userId;
-    const isPassenger = carpool.passengers.some(
-      (p) => p.userId === userId && p.status === 'ACCEPTED',
-    );
-    const isMember = isDriver || isPassenger;
+    const isMember = this.isCarpoolMember(carpool, userId);
 
     const canChat = isActive && isMember;
 

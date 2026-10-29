@@ -26,6 +26,7 @@ export function getNotificationSound(
     case notificationConstants.CARPOOL_NOTIFICATION_TYPE_ACCEPTED:
       return NOTIFICATION_SOUNDS.carpoolPositive;
     case notificationConstants.CARPOOL_NOTIFICATION_TYPE_REJECTED:
+    case notificationConstants.CARPOOL_NOTIFICATION_TYPE_REMOVED:
       return NOTIFICATION_SOUNDS.carpoolRejection;
     default:
       return type.startsWith('FEED_FRENZY_') || isMilestone

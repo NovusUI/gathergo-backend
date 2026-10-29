@@ -1,3 +1,5 @@
+import { DashboardRole, DashboardAccountStatus } from '@prisma/client';
+import { ConflictException } from '@nestjs/common';
 import {
   AccountOwnershipType,
   CreatorAlatProfileStatus,
@@ -8,9 +10,20 @@ import {
   PaymentType,
   RiskStatus,
   SettlementStatus,
+  SettlementRecordStatus,
+  Prisma,
+  SettlementRecord,
   TransactionStatusType,
 } from '@prisma/client';
 import { WalletService } from './wallet.service';
+import { SettlementRecordStatusDto } from '../dto/wallet.dto';
+
+const dashboardAdmin = {
+  id: 'dashboard-admin',
+  role: DashboardRole.ADMIN,
+  status: DashboardAccountStatus.ACTIVE,
+  mustChangePassword: false,
+};
 
 describe('WalletService', () => {
   let prisma: any;
@@ -80,6 +93,31 @@ describe('WalletService', () => {
     (service as any).syncCreatorSettlementStatus = jest
       .fn()
       .mockResolvedValue(undefined);
+  });
+
+  it('reconciles each matching creator once, including legacy event ownership', async () => {
+    const reset = jest
+      .spyOn(service, 'resetUnsuccessfulSettlementStatuses')
+      .mockResolvedValue(undefined);
+    const refresh = jest
+      .spyOn(service, 'refreshCreatorSettlementStatus')
+      .mockResolvedValue(undefined);
+    const findMany = jest.fn().mockResolvedValue([
+      { creatorId: 'creator-1', event: { creatorId: 'creator-1' } },
+      { creatorId: null, event: { creatorId: 'creator-1' } },
+      { creatorId: 'creator-2', event: null },
+      { creatorId: null, event: null },
+    ]);
+    Object.assign(service['prisma'].transactionReference, { findMany });
+    const scope = { userId: 'buyer-1' };
+    await service.refreshSettlementStatuses(scope);
+    expect(reset).toHaveBeenCalledWith(scope);
+    expect(findMany).toHaveBeenCalledWith({
+      where: { AND: [scope], status: TransactionStatusType.SUCCESS },
+      select: { creatorId: true, event: { select: { creatorId: true } } },
+      distinct: ['creatorId', 'eventId'],
+    });
+    expect(refresh.mock.calls).toEqual([['creator-1'], ['creator-2']]);
   });
 
   it('includes risk reasons and manual review details in wallet transaction history', async () => {
@@ -835,8 +873,6 @@ describe('WalletService', () => {
   });
 
   it('returns an internal KYC queue with summary and formatted review context', async () => {
-    process.env.INTERNAL_OPS_KEY = 'ops-secret';
-
     prisma.creatorKycVerification.findMany.mockResolvedValue([
       {
         id: 'kyc_123',
@@ -898,7 +934,7 @@ describe('WalletService', () => {
       .mockResolvedValueOnce(1)
       .mockResolvedValueOnce(0);
 
-    const result = await service.getInternalKycQueue({}, 'ops-secret');
+    const result = await service.getInternalKycQueue({}, dashboardAdmin);
 
     expect(prisma.creatorKycVerification.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -938,8 +974,6 @@ describe('WalletService', () => {
   });
 
   it('returns an internal ALAT queue with payout readiness context', async () => {
-    process.env.INTERNAL_OPS_KEY = 'ops-secret';
-
     prisma.user.findMany.mockResolvedValue([
       {
         id: 'creator_123',
@@ -988,7 +1022,7 @@ describe('WalletService', () => {
       .mockResolvedValueOnce(2)
       .mockResolvedValueOnce(1);
 
-    const result = await service.getInternalAlatQueue({}, 'ops-secret');
+    const result = await service.getInternalAlatQueue({}, dashboardAdmin);
 
     expect(prisma.user.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1030,5 +1064,275 @@ describe('WalletService', () => {
         }),
       }),
     ]);
+  });
+  describe('calculated internal settlements', () => {
+    function createOpsStore() {
+      const db = {
+        creatorSettlementProfile: { findUnique: jest.fn() },
+        creatorAlatProfile: { findUnique: jest.fn() },
+        transactionReference: {
+          findMany: jest.fn<
+            Promise<(typeof payment)[]>,
+            [Prisma.TransactionReferenceFindManyArgs]
+          >(),
+          updateMany: jest.fn<
+            Promise<Prisma.BatchPayload>,
+            [Prisma.TransactionReferenceUpdateManyArgs]
+          >(),
+        },
+        settlementRecord: {
+          create: jest.fn<
+            Promise<Pick<SettlementRecord, 'id'>>,
+            [Prisma.SettlementRecordCreateArgs]
+          >(),
+          findUnique: jest.fn(),
+          findMany: jest.fn(),
+          count: jest.fn(),
+          aggregate: jest.fn(),
+        },
+        settlementAllocation: { createMany: jest.fn() },
+        user: { findUnique: jest.fn() },
+      };
+      return {
+        ...db,
+        $transaction: jest.fn(
+          (callback: (client: typeof db) => Promise<unknown>) => callback(db),
+        ),
+      };
+    }
+    let ops: ReturnType<typeof createOpsStore>;
+    const creator = {
+      id: 'creator-1',
+      username: 'host',
+      fullName: 'Test Creator',
+      email: 'host@example.test',
+    };
+    const payment = {
+      id: 'payment-1',
+      creatorId: creator.id,
+      amount: 100000,
+      creatorPayable: 90000,
+      platformFee: 10000,
+      providerFee: 0,
+      metadata: { amountUnit: 'KOBO' },
+      status: TransactionStatusType.SUCCESS,
+      settlementStatus: SettlementStatus.READY,
+      riskStatus: RiskStatus.CLEAR,
+      createdAt: new Date(),
+      event: null,
+    };
+    beforeEach(() => {
+      ops = createOpsStore();
+      Object.assign(service['prisma'], ops);
+      ops.creatorSettlementProfile.findUnique.mockResolvedValue({
+        status: CreatorSettlementProfileStatus.ACTIVE,
+        bankName: 'Test Bank',
+        accountName: 'Test Creator',
+        accountNumber: '0123456789',
+      });
+      ops.transactionReference.findMany.mockResolvedValue([payment]);
+      ops.user.findUnique.mockResolvedValue(creator);
+    });
+
+    it('calculates net deductions from eligible payments and excludes existing allocations', async () => {
+      jest.spyOn(service, 'getWalletOverview').mockResolvedValue({
+        balance: {
+          availableBalance: 5000,
+          heldBalance: 100,
+          processingBalance: 200,
+          settledBalance: 300,
+          totalCollected: 6000,
+          currency: 'NGN',
+        },
+        payoutProfile: null,
+        alatProfile: null,
+        recentTransactions: [],
+        recentSettlements: [],
+      });
+      const preview = await service.previewSettlement(
+        creator.id,
+        dashboardAdmin,
+      );
+      expect(preview.calculation).toEqual({
+        grossAmountKobo: 100000,
+        deductionsKobo: 10000,
+        netAmountKobo: 90000,
+        transactionCount: 1,
+      });
+      expect(preview.candidate.balance.availableBalance).toBe(900);
+      expect(preview.candidate.balance.heldBalance).toBe(100);
+      expect(preview.candidate.canSettle).toBe(false);
+      expect(ops.transactionReference.findMany.mock.calls[0][0]).toMatchObject({
+        where: {
+          status: TransactionStatusType.SUCCESS,
+          riskStatus: RiskStatus.CLEAR,
+          settlementStatus: SettlementStatus.READY,
+          settlementAllocations: { none: {} },
+        },
+      });
+    });
+
+    it('rejects a stale preview before reserving or allocating any payment', async () => {
+      await expect(
+        service.createSettlement(
+          creator.id,
+          { expectedAmountKobo: 99999, expectedTransactionCount: 1 },
+          dashboardAdmin,
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(ops.transactionReference.updateMany).not.toHaveBeenCalled();
+      expect(ops.settlementRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('reserves the calculated eligible amount and records its allocations', async () => {
+      ops.transactionReference.updateMany.mockResolvedValue({ count: 1 });
+      ops.settlementRecord.create.mockResolvedValue({ id: 'settlement-1' });
+      ops.settlementRecord.findUnique.mockResolvedValue({
+        id: 'settlement-1',
+        reference: 'SET-1',
+        amount: 90000,
+        status: SettlementRecordStatus.PENDING,
+        destinationBankName: 'Test Bank',
+        destinationAccountName: 'Test Creator',
+        destinationAccountNumber: '0123456789',
+        allocations: [{ id: 'allocation-1' }],
+        createdAt: new Date(),
+        processedAt: null,
+      });
+      const record = await service.createSettlement(
+        creator.id,
+        { expectedAmountKobo: 90000, expectedTransactionCount: 1 },
+        dashboardAdmin,
+      );
+      expect(record.amount).toBe(900);
+      expect(record.transactionCount).toBe(1);
+      expect(ops.settlementRecord.create.mock.calls[0][0]).toMatchObject({
+        data: {
+          creatorId: creator.id,
+          amount: 90000,
+          status: SettlementRecordStatus.PENDING,
+        },
+      });
+      expect(
+        ops.transactionReference.updateMany.mock.calls[0][0],
+      ).toMatchObject({
+        where: {
+          riskStatus: RiskStatus.CLEAR,
+          settlementStatus: SettlementStatus.READY,
+          settlementAllocations: { none: {} },
+        },
+        data: { settlementStatus: SettlementStatus.PROCESSING },
+      });
+    });
+
+    it('rejects a competing claim before creating another settlement', async () => {
+      ops.transactionReference.updateMany.mockResolvedValue({ count: 0 });
+      await expect(
+        service.createSettlement(
+          creator.id,
+          { expectedAmountKobo: 90000, expectedTransactionCount: 1 },
+          dashboardAdmin,
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(ops.settlementRecord.create).not.toHaveBeenCalled();
+      expect(ops.settlementAllocation.createMany).not.toHaveBeenCalled();
+    });
+
+    it('requires both preview checks when either is supplied', async () => {
+      await expect(
+        service.createSettlement(
+          creator.id,
+          { expectedAmountKobo: 90000 },
+          dashboardAdmin,
+        ),
+      ).rejects.toThrow('both');
+    });
+
+    it('rejects disabled dashboard accounts before loading settlement data', async () => {
+      await expect(
+        service.previewSettlement(creator.id, {
+          ...dashboardAdmin,
+          status: DashboardAccountStatus.DISABLED,
+        }),
+      ).rejects.toThrow();
+      expect(ops.user.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('prevents reversing a successful settlement through outcome recording', async () => {
+      ops.settlementRecord.findUnique.mockResolvedValue({
+        id: 'settlement-1',
+        status: SettlementRecordStatus.SUCCESS,
+        allocations: [],
+      });
+      await expect(
+        service.completeSettlement(
+          'settlement-1',
+          { status: SettlementRecordStatusDto.FAILED },
+          dashboardAdmin,
+        ),
+      ).rejects.toThrow('cannot be reversed');
+      expect(ops.$transaction).not.toHaveBeenCalled();
+    });
+    it('reapplies settlement holds when a payout profile becomes restricted', async () => {
+      ops.creatorSettlementProfile.findUnique
+        .mockResolvedValueOnce({
+          status: CreatorSettlementProfileStatus.RESTRICTED,
+        })
+        .mockResolvedValue(null);
+      ops.creatorAlatProfile.findUnique.mockResolvedValue(null);
+      ops.transactionReference.findMany.mockResolvedValue([]);
+      ops.settlementRecord.findMany.mockResolvedValue([]);
+      ops.settlementRecord.aggregate.mockResolvedValue({ _sum: { amount: 0 } });
+      await service.getWalletOverview(creator.id);
+      expect(service['syncCreatorSettlementStatus']).toHaveBeenCalledWith(
+        creator.id,
+        CreatorSettlementProfileStatus.RESTRICTED,
+        service['prisma'],
+      );
+    });
+
+    it('treats repeated success confirmation as idempotent', async () => {
+      const record = {
+        id: 'settlement-1',
+        status: SettlementRecordStatus.SUCCESS,
+        amount: 90000,
+        allocations: [{ transactionReferenceId: 'payment-1' }],
+        processedAt: new Date('2026-10-26T10:00:00.000Z'),
+        destinationAccountNumber: '0123456789',
+      };
+      ops.settlementRecord.findUnique.mockResolvedValue(record);
+      const result = await service.completeSettlement(
+        record.id,
+        { status: SettlementRecordStatusDto.SUCCESS },
+        dashboardAdmin,
+      );
+      expect(result.processedAt).toBe(record.processedAt);
+      expect(ops.$transaction).not.toHaveBeenCalled();
+    });
+  });
+  it('opens the exact creator KYC record even when it is already verified', async () => {
+    prisma.creatorKycVerification.findMany.mockResolvedValue([]);
+    prisma.creatorKycVerification.count.mockResolvedValue(0);
+    await service.getInternalKycQueue(
+      { userId: 'creator-target' },
+      dashboardAdmin,
+    );
+    expect(prisma.creatorKycVerification.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: 'creator-target' } }),
+    );
+  });
+
+  it('scopes the payout directory to the selected creator', async () => {
+    prisma.user.findMany.mockResolvedValue([]);
+    prisma.user.count.mockResolvedValue(0);
+    await service.getInternalAlatQueue(
+      { userId: 'creator-target', needsAction: false },
+      dashboardAdmin,
+    );
+    expect(prisma.user.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'creator-target', settlementProfile: { isNot: null } },
+      }),
+    );
   });
 });

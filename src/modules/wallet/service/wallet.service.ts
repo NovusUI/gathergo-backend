@@ -1,10 +1,15 @@
+import { DashboardRole } from '@prisma/client';
+import { assertDashboardAccess } from 'src/modules/dashboard-auth/dashboard-auth.policy';
+import type { DashboardActor } from 'src/modules/dashboard-auth/dashboard-auth.types';
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import * as crypto from 'crypto';
+import type { CreatorSettlementProfile } from '@prisma/client';
 import {
   AccountOwnershipType,
   CreatorAlatProfileStatus,
@@ -21,7 +26,12 @@ import {
 } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { PaystackService } from 'src/modules/paystack/paystack.service';
-import { calculatePlatformFeeKobo } from 'src/modules/transaction-reference/payment-pricing.util';
+import {
+  resolveChargedAmountKobo,
+  resolveGrossAmountKobo,
+  resolveCreatorPayableKobo,
+  resolvePlatformFeeKobo,
+} from 'src/modules/transaction-reference/payment-pricing.util';
 import {
   AccountChangesQueryDto,
   CompleteSettlementDto,
@@ -29,6 +39,8 @@ import {
   CreatorPayoutProfileStatusDto,
   InternalAlatQueueQueryDto,
   InternalKycQueueQueryDto,
+  InternalSettlementQueueQueryDto,
+  InternalSettlementsQueryDto,
   KycTierDto,
   KycResolutionNotificationTargetDto,
   NotifyOnKycResolutionDto,
@@ -54,6 +66,14 @@ import {
   DikriptNinResponse,
   DikriptService,
 } from './dikript.service';
+
+const walletTransactionInclude = {
+  event: { select: { title: true } },
+  user: { select: { username: true, fullName: true } },
+} satisfies Prisma.TransactionReferenceInclude;
+type WalletTransaction = Prisma.TransactionReferenceGetPayload<{
+  include: typeof walletTransactionInclude;
+}>;
 
 const KYC_PROVIDER_DIKRIPT = VerificationProvider.DIKRIPT;
 const BASIC_KYC_SETTLEMENT_CAP_NAIRA = Number(
@@ -81,22 +101,60 @@ export class WalletService {
     private readonly notificationService: NotificationService,
   ) {}
 
-  async getWalletOverview(userId: string) {
-    await this.backfillCreatorTransactions(userId);
-    const currentPayoutProfile =
-      await this.prisma.creatorSettlementProfile.findUnique({
-        where: { userId },
-        select: { status: true },
-      });
+  async resetUnsuccessfulSettlementStatuses(
+    scope: Prisma.TransactionReferenceWhereInput,
+    db: Prisma.TransactionClient = this.prisma,
+  ) {
+    await db.transactionReference.updateMany({
+      where: {
+        AND: [scope],
+        status: { not: TransactionStatusType.SUCCESS },
+        settlementStatus: {
+          in: [
+            SettlementStatus.READY,
+            SettlementStatus.HELD_KYC,
+            SettlementStatus.HELD_RISK,
+          ],
+        },
+      },
+      data: { settlementStatus: SettlementStatus.NOT_READY },
+    });
+  }
 
-    if (
-      currentPayoutProfile?.status === CreatorSettlementProfileStatus.ACTIVE
-    ) {
-      await this.syncCreatorSettlementStatus(
-        userId,
-        currentPayoutProfile.status,
-      );
+  async refreshCreatorSettlementStatus(
+    userId: string,
+    db: Prisma.TransactionClient = this.prisma,
+  ) {
+    const profile = await db.creatorSettlementProfile.findUnique({
+      where: { userId },
+      select: { status: true },
+    });
+    await this.syncCreatorSettlementStatus(
+      userId,
+      profile?.status ?? CreatorSettlementProfileStatus.NOT_STARTED,
+      db,
+    );
+  }
+
+  async refreshSettlementStatuses(
+    scope: Prisma.TransactionReferenceWhereInput,
+  ) {
+    await this.resetUnsuccessfulSettlementStatuses(scope);
+    const payments = await this.prisma.transactionReference.findMany({
+      where: { AND: [scope], status: TransactionStatusType.SUCCESS },
+      select: { creatorId: true, event: { select: { creatorId: true } } },
+      distinct: ['creatorId', 'eventId'],
+    });
+    const creatorIds = new Set(
+      payments.map((payment) => payment.creatorId ?? payment.event?.creatorId),
+    );
+    for (const creatorId of creatorIds) {
+      if (creatorId) await this.refreshCreatorSettlementStatus(creatorId);
     }
+  }
+
+  async getWalletOverview(userId: string) {
+    await this.refreshCreatorSettlementStatus(userId);
 
     const [
       payoutProfile,
@@ -131,14 +189,7 @@ export class WalletService {
           creatorId: userId,
           status: TransactionStatusType.SUCCESS,
         },
-        include: {
-          event: {
-            select: { title: true },
-          },
-          user: {
-            select: { username: true, fullName: true },
-          },
-        },
+        include: walletTransactionInclude,
         orderBy: { createdAt: 'desc' },
         take: 10,
       }),
@@ -163,8 +214,8 @@ export class WalletService {
 
     const balance = balanceTransactions.reduce(
       (acc, transaction) => {
-        const grossAmountKobo = this.resolveGrossAmountKobo(transaction);
-        const creatorPayableKobo = this.resolveCreatorPayableKobo(transaction);
+        const grossAmountKobo = resolveGrossAmountKobo(transaction);
+        const creatorPayableKobo = resolveCreatorPayableKobo(transaction);
 
         acc.totalCollected += grossAmountKobo;
 
@@ -393,8 +444,11 @@ export class WalletService {
     };
   }
 
-  async getInternalKycQueue(dto: InternalKycQueueQueryDto, opsKey?: string) {
-    this.assertOpsKey(opsKey);
+  async getInternalKycQueue(
+    dto: InternalKycQueueQueryDto,
+    actor: DashboardActor,
+  ) {
+    assertDashboardAccess(actor);
 
     const page = dto.page || 1;
     const pageSize = Math.min(dto.pageSize || 20, 50);
@@ -482,8 +536,11 @@ export class WalletService {
     };
   }
 
-  async getInternalAlatQueue(dto: InternalAlatQueueQueryDto, opsKey?: string) {
-    this.assertOpsKey(opsKey);
+  async getInternalAlatQueue(
+    dto: InternalAlatQueueQueryDto,
+    actor: DashboardActor,
+  ) {
+    assertDashboardAccess(actor);
 
     const page = dto.page || 1;
     const pageSize = Math.min(dto.pageSize || 20, 50);
@@ -1468,9 +1525,9 @@ export class WalletService {
   async reviewPayoutProfile(
     targetUserId: string,
     dto: ReviewPayoutProfileDto,
-    opsKey?: string,
+    actor: DashboardActor,
   ) {
-    this.assertOpsKey(opsKey);
+    assertDashboardAccess(actor, DashboardRole.ADMIN);
 
     const existingProfile =
       await this.prisma.creatorSettlementProfile.findUnique({
@@ -3059,8 +3116,8 @@ export class WalletService {
     );
   }
 
-  async reviewKyc(userId: string, dto: ReviewKycDto, opsKey?: string) {
-    this.assertOpsKey(opsKey);
+  async reviewKyc(userId: string, dto: ReviewKycDto, actor: DashboardActor) {
+    assertDashboardAccess(actor, DashboardRole.ADMIN);
 
     const [payoutProfile, existingVerification] = await Promise.all([
       this.prisma.creatorSettlementProfile.findUnique({
@@ -3216,9 +3273,9 @@ export class WalletService {
   async upsertAlatProfile(
     userId: string,
     dto: UpsertAlatProfileDto,
-    opsKey?: string,
+    actor: DashboardActor,
   ) {
-    this.assertOpsKey(opsKey);
+    assertDashboardAccess(actor, DashboardRole.ADMIN);
 
     const payoutProfile = await this.prisma.creatorSettlementProfile.findUnique(
       {
@@ -3353,14 +3410,7 @@ export class WalletService {
     const [transactions, total] = await Promise.all([
       this.prisma.transactionReference.findMany({
         where: whereClause,
-        include: {
-          event: {
-            select: { title: true },
-          },
-          user: {
-            select: { username: true, fullName: true },
-          },
-        },
+        include: walletTransactionInclude,
         orderBy: { createdAt: 'desc' },
         skip,
         take: pageSize,
@@ -3411,12 +3461,220 @@ export class WalletService {
     };
   }
 
+  async getInternalSettlementQueue(
+    dto: InternalSettlementQueueQueryDto,
+    actor: DashboardActor,
+  ) {
+    assertDashboardAccess(actor);
+    const page = dto.page || 1;
+    const pageSize = Math.min(dto.pageSize || 20, 50);
+    const search = dto.search?.trim();
+    const where: Prisma.UserWhereInput = {
+      AND: [
+        {
+          OR: [
+            {
+              creatorTransactions: {
+                some: { status: TransactionStatusType.SUCCESS },
+              },
+            },
+            {
+              eventsCreated: {
+                some: {
+                  transactions: {
+                    some: {
+                      status: TransactionStatusType.SUCCESS,
+                      creatorId: null,
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        },
+        ...(search
+          ? [
+              {
+                OR: [
+                  { id: search },
+                  {
+                    fullName: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
+                  },
+                  {
+                    username: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
+                  },
+                  {
+                    email: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
+                  },
+                ],
+              },
+            ]
+          : []),
+      ],
+    };
+    const [creators, total] = await Promise.all([
+      this.prisma.user.findMany({
+        where,
+        select: { id: true, fullName: true, username: true, email: true },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.user.count({ where }),
+    ]);
+    const data = await Promise.all(
+      creators.map(
+        async (creator) =>
+          (await this.calculateSettlementPreview(creator)).candidate,
+      ),
+    );
+    return { data, total, page, pageSize };
+  }
+
+  async getInternalSettlements(
+    dto: InternalSettlementsQueryDto,
+    actor: DashboardActor,
+  ) {
+    assertDashboardAccess(actor);
+    const page = dto.page || 1;
+    const pageSize = Math.min(dto.pageSize || 20, 50);
+    const where: Prisma.SettlementRecordWhereInput = {
+      ...(dto.creatorId ? { creatorId: dto.creatorId } : {}),
+      ...(dto.status ? { status: dto.status as SettlementRecordStatus } : {}),
+    };
+    const [records, total] = await Promise.all([
+      this.prisma.settlementRecord.findMany({
+        where,
+        include: {
+          allocations: { select: { id: true } },
+          creator: {
+            select: { id: true, fullName: true, username: true, email: true },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.settlementRecord.count({ where }),
+    ]);
+    return {
+      data: records.map((record) => ({
+        ...this.formatSettlement(record),
+        creator: record.creator,
+      })),
+      total,
+      page,
+      pageSize,
+    };
+  }
+
+  async previewSettlement(creatorId: string, actor: DashboardActor) {
+    assertDashboardAccess(actor);
+    const creator = await this.prisma.user.findUnique({
+      where: { id: creatorId },
+      select: { id: true, fullName: true, username: true, email: true },
+    });
+    if (!creator) throw new NotFoundException('Creator not found');
+    return this.calculateSettlementPreview(creator);
+  }
+
+  private loadReadySettlementTransactions(
+    creatorId: string,
+    transactionIds?: string[],
+    db: Prisma.TransactionClient = this.prisma,
+  ) {
+    return db.transactionReference.findMany({
+      where: {
+        creatorId,
+        status: TransactionStatusType.SUCCESS,
+        settlementStatus: SettlementStatus.READY,
+        riskStatus: RiskStatus.CLEAR,
+        creatorPayable: { gt: 0 },
+        settlementAllocations: { none: {} },
+        ...(transactionIds?.length ? { id: { in: transactionIds } } : {}),
+      },
+      include: { event: { select: { id: true, title: true } } },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+  }
+
+  private async calculateSettlementPreview(
+    creator: Prisma.UserGetPayload<{
+      select: { id: true; fullName: true; username: true; email: true };
+    }>,
+  ) {
+    const wallet = await this.getWalletOverview(creator.id);
+    const transactions = await this.loadReadySettlementTransactions(creator.id);
+    const grossAmountKobo = transactions.reduce(
+      (sum, transaction) => sum + resolveGrossAmountKobo(transaction),
+      0,
+    );
+    const netAmountKobo = transactions.reduce(
+      (sum, transaction) => sum + resolveCreatorPayableKobo(transaction),
+      0,
+    );
+    const profile = wallet.payoutProfile;
+    const blockers: string[] = [];
+    if (!profile || profile.status !== CreatorSettlementProfileStatus.ACTIVE)
+      blockers.push('An active payout profile is required.');
+    if (
+      !profile ||
+      !profile.bankName ||
+      !profile.accountName ||
+      !profile.accountNumberMasked
+    )
+      blockers.push('The payout bank destination is incomplete.');
+    if (!transactions.length)
+      blockers.push('No unallocated payments are ready for settlement.');
+    return {
+      candidate: {
+        creator,
+        payoutProfile: profile
+          ? {
+              status: profile.status,
+              kycTier: profile.kycTier,
+              bankName: profile.bankName,
+              accountName: profile.accountName,
+              accountNumberMasked: profile.accountNumberMasked,
+            }
+          : null,
+        balance: { ...wallet.balance, availableBalance: netAmountKobo / 100 },
+        readyTransactionCount: transactions.length,
+        canSettle: blockers.length === 0,
+        blockers,
+      },
+      calculation: {
+        grossAmountKobo,
+        deductionsKobo: grossAmountKobo - netAmountKobo,
+        netAmountKobo,
+        transactionCount: transactions.length,
+      },
+      transactions: transactions.slice(0, 20).map((transaction) => ({
+        id: transaction.id,
+        grossAmount: resolveGrossAmountKobo(transaction) / 100,
+        creatorPayable: resolveCreatorPayableKobo(transaction) / 100,
+        createdAt: transaction.createdAt,
+        event: transaction.event,
+      })),
+      evaluatedAt: new Date().toISOString(),
+    };
+  }
+
   async createSettlement(
     creatorId: string,
     dto: CreateSettlementDto,
-    opsKey?: string,
+    actor: DashboardActor,
   ) {
-    this.assertOpsKey(opsKey);
+    assertDashboardAccess(actor, DashboardRole.ADMIN);
     await this.backfillCreatorTransactions(creatorId);
 
     const payoutProfile = await this.prisma.creatorSettlementProfile.findUnique(
@@ -3443,57 +3701,75 @@ export class WalletService {
       throw new BadRequestException('Creator payout destination is incomplete');
     }
 
-    const transactions = await this.prisma.transactionReference.findMany({
-      where: {
-        creatorId,
-        status: TransactionStatusType.SUCCESS,
-        settlementStatus: SettlementStatus.READY,
-        creatorPayable: { gt: 0 },
-        ...(dto.transactionIds?.length
-          ? { id: { in: dto.transactionIds } }
-          : {}),
-      },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    if (transactions.length === 0) {
-      throw new BadRequestException('No transactions are ready for settlement');
+    if (
+      (dto.expectedAmountKobo === undefined) !==
+      (dto.expectedTransactionCount === undefined)
+    ) {
+      throw new BadRequestException(
+        'Provide both the preview amount and payment count.',
+      );
     }
 
-    const totalAmount = transactions.reduce(
-      (sum, transaction) => sum + this.resolveCreatorPayableKobo(transaction),
-      0,
-    );
-    const reference = this.generateSettlementReference();
-
     const settlement = await this.prisma.$transaction(async (tx) => {
+      const transactions = await this.loadReadySettlementTransactions(
+        creatorId,
+        dto.transactionIds,
+        tx,
+      );
+      if (!transactions.length)
+        throw new BadRequestException(
+          'No transactions are ready for settlement',
+        );
+      const totalAmount = transactions.reduce(
+        (sum, transaction) => sum + resolveCreatorPayableKobo(transaction),
+        0,
+      );
+      if (
+        (dto.transactionIds?.length &&
+          transactions.length !== new Set(dto.transactionIds).size) ||
+        (dto.expectedAmountKobo !== undefined &&
+          (dto.expectedAmountKobo !== totalAmount ||
+            dto.expectedTransactionCount !== transactions.length))
+      )
+        throw new ConflictException(
+          'Settlement eligibility changed. Recalculate the preview before creating a settlement.',
+        );
+
+      const claimed = await tx.transactionReference.updateMany({
+        where: {
+          id: { in: transactions.map((transaction) => transaction.id) },
+          creatorId,
+          status: TransactionStatusType.SUCCESS,
+          settlementStatus: SettlementStatus.READY,
+          riskStatus: RiskStatus.CLEAR,
+          creatorPayable: { gt: 0 },
+          settlementAllocations: { none: {} },
+        },
+        data: { settlementStatus: SettlementStatus.PROCESSING },
+      });
+      if (claimed.count !== transactions.length)
+        throw new ConflictException(
+          'A payment changed during settlement preparation. Recalculate the preview.',
+        );
+
       const settlementRecord = await tx.settlementRecord.create({
         data: {
           creatorId,
           amount: totalAmount,
-          reference,
+          reference: this.generateSettlementReference(),
           status: SettlementRecordStatus.PENDING,
           destinationBankName: payoutProfile.bankName,
           destinationAccountName: payoutProfile.accountName,
           destinationAccountNumber: payoutProfile.accountNumber,
         },
       });
-
       await tx.settlementAllocation.createMany({
         data: transactions.map((transaction) => ({
           settlementId: settlementRecord.id,
           transactionReferenceId: transaction.id,
-          amount: this.resolveCreatorPayableKobo(transaction),
+          amount: resolveCreatorPayableKobo(transaction),
         })),
       });
-
-      await tx.transactionReference.updateMany({
-        where: {
-          id: { in: transactions.map((transaction) => transaction.id) },
-        },
-        data: { settlementStatus: SettlementStatus.PROCESSING },
-      });
-
       return settlementRecord;
     });
 
@@ -3512,9 +3788,9 @@ export class WalletService {
   async completeSettlement(
     settlementId: string,
     dto: CompleteSettlementDto,
-    opsKey?: string,
+    actor: DashboardActor,
   ) {
-    this.assertOpsKey(opsKey);
+    assertDashboardAccess(actor, DashboardRole.ADMIN);
 
     const settlement = await this.prisma.settlementRecord.findUnique({
       where: { id: settlementId },
@@ -3534,45 +3810,76 @@ export class WalletService {
     );
 
     const status = dto.status as SettlementRecordStatus;
+    if (
+      settlement.status === SettlementRecordStatus.SUCCESS &&
+      status !== SettlementRecordStatus.SUCCESS
+    ) {
+      throw new BadRequestException(
+        'A successful settlement cannot be reversed through outcome recording.',
+      );
+    }
+    if (settlement.status === SettlementRecordStatus.SUCCESS) {
+      return this.formatSettlement(settlement);
+    }
 
-    const updatedSettlement = await this.prisma.$transaction(async (tx) => {
-      const record = await tx.settlementRecord.update({
-        where: { id: settlementId },
-        data: {
-          status,
-          processedAt:
-            status === SettlementRecordStatus.PENDING ? null : new Date(),
-          metadata: {
-            ...(typeof settlement.metadata === 'object' && settlement.metadata
-              ? settlement.metadata
-              : {}),
-            note: dto.note || null,
+    const updatedSettlement = await this.prisma
+      .$transaction(async (tx) => {
+        const record = await tx.settlementRecord.update({
+          where: { id: settlementId, status: settlement.status },
+          data: {
+            status,
+            processedAt:
+              status === SettlementRecordStatus.PENDING ? null : new Date(),
+            metadata: {
+              ...(typeof settlement.metadata === 'object' && settlement.metadata
+                ? settlement.metadata
+                : {}),
+              note: dto.note || null,
+            },
           },
-        },
+        });
+
+        if (status === SettlementRecordStatus.SUCCESS) {
+          await tx.transactionReference.updateMany({
+            where: { id: { in: allocationIds } },
+            data: {
+              settlementStatus: SettlementStatus.SETTLED,
+              settledAt: new Date(),
+            },
+          });
+        } else if (
+          status === SettlementRecordStatus.FAILED ||
+          status === SettlementRecordStatus.CANCELLED
+        ) {
+          await tx.transactionReference.updateMany({
+            where: { id: { in: allocationIds } },
+            data: {
+              settlementStatus: SettlementStatus.READY,
+              settledAt: null,
+            },
+          });
+        } else {
+          await tx.transactionReference.updateMany({
+            where: { id: { in: allocationIds } },
+            data: {
+              settlementStatus: SettlementStatus.PROCESSING,
+              settledAt: null,
+            },
+          });
+        }
+
+        return record;
+      })
+      .catch((error) => {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === 'P2025'
+        )
+          throw new ConflictException(
+            'Settlement changed during reconciliation. Refresh before trying again.',
+          );
+        throw error;
       });
-
-      if (status === SettlementRecordStatus.SUCCESS) {
-        await tx.transactionReference.updateMany({
-          where: { id: { in: allocationIds } },
-          data: {
-            settlementStatus: SettlementStatus.SETTLED,
-            settledAt: new Date(),
-          },
-        });
-      } else if (
-        status === SettlementRecordStatus.FAILED ||
-        status === SettlementRecordStatus.CANCELLED
-      ) {
-        await tx.transactionReference.updateMany({
-          where: { id: { in: allocationIds } },
-          data: {
-            settlementStatus: SettlementStatus.READY,
-          },
-        });
-      }
-
-      return record;
-    });
 
     const hydratedSettlement = await this.prisma.settlementRecord.findUnique({
       where: { id: updatedSettlement.id },
@@ -3589,30 +3896,33 @@ export class WalletService {
   private async syncCreatorSettlementStatus(
     creatorId: string,
     profileStatus: CreatorSettlementProfileStatus,
+    db: Prisma.TransactionClient = this.prisma,
   ) {
-    await this.backfillCreatorTransactions(creatorId);
+    await this.backfillCreatorTransactions(creatorId, db);
+    await this.resetUnsuccessfulSettlementStatuses({ creatorId }, db);
 
     if (profileStatus === CreatorSettlementProfileStatus.ACTIVE) {
-      const payoutProfile =
-        await this.prisma.creatorSettlementProfile.findUnique({
-          where: { userId: creatorId },
-          include: { kycVerification: true },
-        });
+      const payoutProfile = await db.creatorSettlementProfile.findUnique({
+        where: { userId: creatorId },
+        include: { kycVerification: true },
+      });
       const kycTier = this.resolveKycTier(
         payoutProfile?.kycVerification,
         payoutProfile,
       );
 
-      await this.prisma.transactionReference.updateMany({
+      await db.transactionReference.updateMany({
         where: {
           creatorId,
           status: TransactionStatusType.SUCCESS,
           settlementStatus: {
-            in: [SettlementStatus.HELD_KYC, SettlementStatus.NOT_READY],
+            in: [
+              SettlementStatus.HELD_KYC,
+              SettlementStatus.READY,
+              SettlementStatus.NOT_READY,
+            ],
           },
-          riskStatus: {
-            in: [RiskStatus.REVIEW, RiskStatus.HOLD],
-          },
+          riskStatus: { not: RiskStatus.CLEAR },
         },
         data: {
           settlementStatus: SettlementStatus.HELD_RISK,
@@ -3620,12 +3930,16 @@ export class WalletService {
       });
 
       if (kycTier === KycTierDto.FULL) {
-        await this.prisma.transactionReference.updateMany({
+        await db.transactionReference.updateMany({
           where: {
             creatorId,
             status: TransactionStatusType.SUCCESS,
             settlementStatus: {
-              in: [SettlementStatus.HELD_KYC, SettlementStatus.NOT_READY],
+              in: [
+                SettlementStatus.HELD_KYC,
+                SettlementStatus.HELD_RISK,
+                SettlementStatus.NOT_READY,
+              ],
             },
             riskStatus: RiskStatus.CLEAR,
           },
@@ -3637,12 +3951,13 @@ export class WalletService {
         return;
       }
 
-      await this.applyBasicKycSettlementCap(creatorId);
-
-      return;
+      if (kycTier === KycTierDto.BASIC) {
+        await this.applyBasicKycSettlementCap(creatorId, db);
+        return;
+      }
     }
 
-    await this.prisma.transactionReference.updateMany({
+    await db.transactionReference.updateMany({
       where: {
         creatorId,
         status: TransactionStatusType.SUCCESS,
@@ -3656,22 +3971,23 @@ export class WalletService {
     });
   }
 
-  private async applyBasicKycSettlementCap(creatorId: string) {
-    const committedAggregate = await this.prisma.transactionReference.aggregate(
-      {
-        _sum: { creatorPayable: true },
-        where: {
-          creatorId,
-          status: TransactionStatusType.SUCCESS,
-          settlementStatus: {
-            in: [SettlementStatus.PROCESSING, SettlementStatus.SETTLED],
-          },
+  private async applyBasicKycSettlementCap(
+    creatorId: string,
+    db: Prisma.TransactionClient = this.prisma,
+  ) {
+    const committedAggregate = await db.transactionReference.aggregate({
+      _sum: { creatorPayable: true },
+      where: {
+        creatorId,
+        status: TransactionStatusType.SUCCESS,
+        settlementStatus: {
+          in: [SettlementStatus.PROCESSING, SettlementStatus.SETTLED],
         },
       },
-    );
+    });
     let committedKobo = committedAggregate._sum.creatorPayable || 0;
 
-    const clearTransactions = await this.prisma.transactionReference.findMany({
+    const clearTransactions = await db.transactionReference.findMany({
       where: {
         creatorId,
         status: TransactionStatusType.SUCCESS,
@@ -3679,16 +3995,17 @@ export class WalletService {
         settlementStatus: {
           in: [
             SettlementStatus.HELD_KYC,
+            SettlementStatus.HELD_RISK,
             SettlementStatus.NOT_READY,
             SettlementStatus.READY,
           ],
         },
       },
-      orderBy: { createdAt: 'asc' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
 
     for (const transaction of clearTransactions) {
-      const creatorPayableKobo = this.resolveCreatorPayableKobo(transaction);
+      const creatorPayableKobo = resolveCreatorPayableKobo(transaction);
       const shouldRelease =
         committedKobo + creatorPayableKobo <= BASIC_KYC_SETTLEMENT_CAP_KOBO;
       const nextStatus = shouldRelease
@@ -3704,7 +4021,7 @@ export class WalletService {
       }
 
       const metadata = this.normalizeJsonObject(transaction.metadata);
-      await this.prisma.transactionReference.update({
+      await db.transactionReference.update({
         where: { id: transaction.id },
         data: {
           settlementStatus: nextStatus,
@@ -3724,15 +4041,16 @@ export class WalletService {
     }
   }
 
-  private async backfillCreatorTransactions(creatorId: string) {
-    const payoutProfile = await this.prisma.creatorSettlementProfile.findUnique(
-      {
-        where: { userId: creatorId },
-        include: { kycVerification: true },
-      },
-    );
+  private async backfillCreatorTransactions(
+    creatorId: string,
+    db: Prisma.TransactionClient = this.prisma,
+  ) {
+    const payoutProfile = await db.creatorSettlementProfile.findUnique({
+      where: { userId: creatorId },
+      include: { kycVerification: true },
+    });
 
-    const transactions = await this.prisma.transactionReference.findMany({
+    const transactions = await db.transactionReference.findMany({
       where: {
         OR: [
           { creatorId },
@@ -3759,18 +4077,11 @@ export class WalletService {
         !Array.isArray(transaction.metadata)
           ? { ...(transaction.metadata as Record<string, any>) }
           : {};
-      const effectiveAmountKobo = this.resolveGrossAmountKobo(transaction);
-      const platformFeeKobo =
-        transaction.platformFee > 0
-          ? transaction.platformFee
-          : this.calculatePlatformFeeKobo(effectiveAmountKobo);
-      const creatorPayableKobo =
-        transaction.creatorPayable > 0
-          ? transaction.creatorPayable
-          : Math.max(
-              effectiveAmountKobo - platformFeeKobo - transaction.providerFee,
-              0,
-            );
+      const platformFeeKobo = resolvePlatformFeeKobo(transaction);
+      const creatorPayableKobo = resolveCreatorPayableKobo(transaction);
+      const chargedAmountKobo = resolveChargedAmountKobo(transaction);
+      if (transaction.amount !== chargedAmountKobo)
+        updates.amount = chargedAmountKobo;
       const resolvedCreatorId =
         transaction.creatorId || transaction.event?.creatorId || null;
       const paymentType = this.resolvePaymentType(
@@ -3788,9 +4099,7 @@ export class WalletService {
         creatorKycTier === KycTierDto.FULL &&
         transaction.riskStatus === RiskStatus.CLEAR;
       const shouldHoldRisk =
-        payoutIsActive &&
-        (transaction.riskStatus === RiskStatus.REVIEW ||
-          transaction.riskStatus === RiskStatus.HOLD);
+        payoutIsActive && transaction.riskStatus !== RiskStatus.CLEAR;
       const inferredSettlementStatus =
         transaction.status !== TransactionStatusType.SUCCESS
           ? transaction.settlementStatus
@@ -3831,76 +4140,12 @@ export class WalletService {
       }
 
       if (Object.keys(updates).length > 0) {
-        await this.prisma.transactionReference.update({
+        await db.transactionReference.update({
           where: { id: transaction.id },
           data: updates,
         });
       }
     }
-  }
-
-  private resolveGrossAmountKobo(transaction: {
-    amount: number;
-    metadata?: Prisma.JsonValue;
-  }) {
-    const metadata =
-      transaction.metadata &&
-      typeof transaction.metadata === 'object' &&
-      !Array.isArray(transaction.metadata)
-        ? (transaction.metadata as Record<string, any>)
-        : {};
-
-    const pricingAmount = Number(metadata?.pricing?.grossAmountKobo || 0);
-    if (pricingAmount > 0) {
-      return pricingAmount;
-    }
-
-    if (metadata.amountUnit === 'KOBO') {
-      return transaction.amount;
-    }
-
-    return transaction.amount * 100;
-  }
-
-  private resolveCreatorPayableKobo(transaction: {
-    amount: number;
-    creatorPayable: number;
-    platformFee: number;
-    providerFee: number;
-    metadata?: Prisma.JsonValue;
-  }) {
-    const metadata =
-      transaction.metadata &&
-      typeof transaction.metadata === 'object' &&
-      !Array.isArray(transaction.metadata)
-        ? (transaction.metadata as Record<string, any>)
-        : {};
-
-    const pricingCreatorPayable = Number(
-      metadata?.pricing?.creatorPayableKobo || 0,
-    );
-    if (pricingCreatorPayable > 0) {
-      return pricingCreatorPayable;
-    }
-
-    if (transaction.creatorPayable > 0) {
-      return transaction.creatorPayable;
-    }
-
-    const grossAmountKobo = this.resolveGrossAmountKobo(transaction);
-    const platformFeeKobo =
-      transaction.platformFee > 0
-        ? transaction.platformFee
-        : this.calculatePlatformFeeKobo(grossAmountKobo);
-
-    return Math.max(
-      grossAmountKobo - platformFeeKobo - transaction.providerFee,
-      0,
-    );
-  }
-
-  private calculatePlatformFeeKobo(grossAmountKobo: number) {
-    return calculatePlatformFeeKobo(grossAmountKobo);
   }
 
   private normalizeJsonObject(value?: Prisma.JsonValue | unknown) {
@@ -4156,9 +4401,7 @@ export class WalletService {
     return PaymentType.TICKET;
   }
 
-  private formatPayoutProfile(profile: any) {
-    const metadata = this.normalizeJsonObject(profile.metadata);
-
+  private formatPayoutProfile(profile: CreatorSettlementProfile) {
     return {
       status: profile.status,
       accountOwnershipType: profile.accountOwnershipType,
@@ -4172,14 +4415,14 @@ export class WalletService {
         this.maskAccountNumber(profile.accountNumber),
       accountNumber: profile.accountNumber,
       bvnLast4: profile.bvnLast4,
-      kycStatus: profile.kycStatus || KycVerificationStatus.NOT_STARTED,
-      nameMatchStatus: profile.nameMatchStatus || NameMatchStatus.NOT_CHECKED,
+      kycStatus: profile.kycStatus,
+      nameMatchStatus: profile.nameMatchStatus,
       accountVerifiedAt: profile.accountVerifiedAt,
       rejectionReason: profile.rejectionReason,
       submittedAt: profile.submittedAt,
       approvedAt: profile.approvedAt,
       accountNameConfirmed: this.isPayoutAccountConfirmed(profile),
-      kycTier: metadata.kycTier || metadata.approvedTier || KycTierDto.NONE,
+      kycTier: this.resolveKycTier(undefined, profile),
     };
   }
 
@@ -4339,13 +4582,10 @@ export class WalletService {
     };
   }
 
-  private formatTransaction(transaction: any) {
-    const grossAmountKobo = this.resolveGrossAmountKobo(transaction);
-    const creatorPayableKobo = this.resolveCreatorPayableKobo(transaction);
-    const platformFeeKobo =
-      transaction.platformFee > 0
-        ? transaction.platformFee
-        : this.calculatePlatformFeeKobo(grossAmountKobo);
+  private formatTransaction(transaction: WalletTransaction) {
+    const grossAmountKobo = resolveGrossAmountKobo(transaction);
+    const creatorPayableKobo = resolveCreatorPayableKobo(transaction);
+    const platformFeeKobo = resolvePlatformFeeKobo(transaction);
 
     return {
       id: transaction.id,
@@ -4775,10 +5015,11 @@ export class WalletService {
 
   private buildInternalKycQueueWhere(dto: InternalKycQueueQueryDto) {
     const hasExplicitScope = Boolean(
-      dto.status || dto.profileStatus || dto.nameMatchStatus,
+      dto.userId || dto.status || dto.profileStatus || dto.nameMatchStatus,
     );
 
     return {
+      ...(dto.userId ? { userId: dto.userId } : {}),
       ...(!hasExplicitScope && {
         OR: [
           {
@@ -6157,6 +6398,7 @@ export class WalletService {
   ): Prisma.UserWhereInput {
     const needsAction = dto.needsAction ?? true;
     const whereClause: Prisma.UserWhereInput = {
+      ...(dto.userId ? { id: dto.userId } : {}),
       settlementProfile: dto.profileStatus
         ? {
             is: {
@@ -6201,13 +6443,5 @@ export class WalletService {
     }
 
     return whereClause;
-  }
-
-  private assertOpsKey(opsKey?: string) {
-    const internalOpsKey = process.env.INTERNAL_OPS_KEY;
-
-    if (!internalOpsKey || opsKey !== internalOpsKey) {
-      throw new UnauthorizedException('Invalid ops key');
-    }
   }
 }

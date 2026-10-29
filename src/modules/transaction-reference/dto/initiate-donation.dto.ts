@@ -16,6 +16,11 @@ import {
 } from './payment-provider.dto';
 
 export class InitiateDonationDto {
+  @ApiPropertyOptional({ enum: ['FOOD_BANK'] })
+  @IsOptional()
+  @IsEnum({ FOOD_BANK: 'FOOD_BANK' })
+  source?: 'FOOD_BANK';
+
   @ApiProperty({
     description: 'Event ID for the donation',
     example: '550e8400-e29b-41d4-a716-446655440000',

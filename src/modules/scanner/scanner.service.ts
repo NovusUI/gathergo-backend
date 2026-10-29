@@ -12,6 +12,12 @@ import {
   QuickScanResultDto,
   ScanType,
 } from './dto/scan.dto';
+import { databaseNow } from '../checkout/checkout-inventory';
+import { FoodBankService } from '../food-bank/food-bank.service';
+import {
+  mealCollectionDetails,
+  MEAL_COLLECTION_MESSAGES,
+} from '../food-bank/collection-policy';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { ScannerPermissionsService } from './permisions/ scanner-permissions.service';
 
@@ -22,6 +28,7 @@ export class ScannerService {
   constructor(
     private prisma: PrismaService,
     private permissionsService: ScannerPermissionsService,
+    private foodBank: FoodBankService,
   ) {}
 
   // Main scan method
@@ -32,6 +39,8 @@ export class ScannerService {
     location?: string,
   ): Promise<ScanResultDto> {
     try {
+      if (qrCode.startsWith('ggmeal:'))
+        return await this.scanMeal(qrCode, userId, markAsUsed);
       // Try to find ticket first
       let ticket = await this.prisma.ticket.findUnique({
         where: { qrCode },
@@ -107,6 +116,15 @@ export class ScannerService {
   // Validate without marking as used
   async validate(qrCode: string, userId: string): Promise<ValidationResultDto> {
     try {
+      if (qrCode.startsWith('ggmeal:')) {
+        const result = await this.scanMeal(qrCode, userId, false);
+        return {
+          isValid: result.success,
+          canMarkUsed: result.data.permissions.canMarkUsed,
+          message: result.message,
+          data: result.data,
+        };
+      }
       let item: any = await this.prisma.ticket.findUnique({
         where: { qrCode },
         include: {
@@ -217,6 +235,57 @@ export class ScannerService {
     }
   }
 
+  private async scanMeal(qrCode: string, userId: string, markAsUsed: boolean) {
+    const found = await this.foodBank.findForScan(qrCode);
+    let pass = found.pass;
+    const { userName } = found;
+    const canMarkUsed = await this.permissionsService.canMarkAsUsed(
+      userId,
+      pass.eventId,
+    );
+    if (markAsUsed) {
+      if (!canMarkUsed)
+        throw new ForbiddenException(
+          'Only authorised food bank staff can record collection',
+        );
+      pass = await this.foodBank.redeem(pass.id, userId);
+    }
+    const details = mealCollectionDetails(pass, await databaseNow(this.prisma));
+    const valid = details.status === 'ready';
+    const message = markAsUsed
+      ? 'Meal collected'
+      : MEAL_COLLECTION_MESSAGES[details.status];
+    await this.logScan({
+      type: 'meal',
+      qrCode,
+      scannedById: userId,
+      eventId: pass.eventId,
+      action: markAsUsed ? 'mark_used' : 'validate',
+      success: markAsUsed || valid,
+      message,
+    });
+    return {
+      success: markAsUsed || valid,
+      message,
+      data: {
+        type: ScanType.MEAL,
+        id: pass.id,
+        eventId: pass.eventId,
+        eventName: pass.event.title,
+        eventDate: pass.collectionStart,
+        userName,
+        status: 'active',
+        isUsed: markAsUsed || pass.isUsed,
+        qrCode,
+        mealCollection: details,
+        permissions: {
+          canMarkUsed,
+          canViewDetails: true,
+        },
+      },
+    };
+  }
+
   // Quick scan - minimal data for fast scanning
   async quickScan(qrCode: string, userId: string): Promise<QuickScanResultDto> {
     const validation = await this.validate(qrCode, userId);
@@ -229,6 +298,7 @@ export class ScannerService {
       eventName: validation.data?.eventName,
       userName: validation.data?.userName,
       eventDate: validation.data?.eventDate,
+      mealCollection: validation.data?.mealCollection,
       qrCode,
     };
   }

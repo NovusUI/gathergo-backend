@@ -1,8 +1,14 @@
+import { DashboardRole } from '@prisma/client';
+import { assertDashboardAccess } from 'src/modules/dashboard-auth/dashboard-auth.policy';
+import type { DashboardActor } from 'src/modules/dashboard-auth/dashboard-auth.types';
 import {
   BadRequestException,
   BadGatewayException,
+  ConflictException,
+  HttpException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -17,6 +23,7 @@ import {
   TransactionStatusType,
 } from '@prisma/client';
 import * as crypto from 'crypto';
+import { WalletService } from '../wallet/service/wallet.service';
 import { CheckoutService } from '../checkout/checkout.service';
 import {
   CheckoutMetadata,
@@ -35,7 +42,11 @@ import {
   PaymentClientContextDto,
   PaymentProviderDto,
 } from './dto/payment-provider.dto';
-import { RiskReviewQueueQueryDto } from './dto/risk-review-queue.dto';
+import {
+  RiskReviewQueueQueryDto,
+  RiskUserRoleDto,
+} from './dto/risk-review-queue.dto';
+import { BatchReviewTransactionRiskDto } from './dto/batch-review-transaction-risk.dto';
 import {
   ReviewTransactionRiskDto,
   ReviewableRiskStatusDto,
@@ -44,7 +55,45 @@ import {
   buildPricingSummary,
   calculatePlatformFeeKobo,
   getPlatformFeeBps,
+  resolveChargedAmountKobo,
+  resolveGrossAmountKobo,
+  resolveCreatorPayableKobo,
 } from './payment-pricing.util';
+
+const riskQueueInclude = {
+  user: {
+    select: {
+      id: true,
+      username: true,
+      fullName: true,
+      email: true,
+    },
+  },
+  creator: {
+    select: {
+      id: true,
+      username: true,
+      fullName: true,
+    },
+  },
+  event: {
+    select: {
+      id: true,
+      title: true,
+      creatorId: true,
+      creator: {
+        select: {
+          id: true,
+          username: true,
+          fullName: true,
+        },
+      },
+    },
+  },
+} satisfies Prisma.TransactionReferenceInclude;
+type RiskQueueTransaction = Prisma.TransactionReferenceGetPayload<{
+  include: typeof riskQueueInclude;
+}>;
 
 type TicketAvailability = {
   id: string;
@@ -96,6 +145,7 @@ export class TransactionReferenceService {
     private readonly ticketService: TicketService,
     private readonly registrationService: RegistrationService,
     private readonly checkout: CheckoutService,
+    private readonly wallet: WalletService,
   ) {}
 
   async initiate(
@@ -443,6 +493,10 @@ export class TransactionReferenceService {
       throw new BadRequestException('This event is not accepting donations');
     }
 
+    if (dto.source === 'FOOD_BANK' && event.registrationType !== 'foodbank')
+      throw new BadRequestException(
+        'Food collection donations require a food bank event',
+      );
     this.assertEventStillAcceptsPayments(event);
 
     if (amount < 500) {
@@ -472,6 +526,7 @@ export class TransactionReferenceService {
 
     const metadata = {
       type: PaymentType.DONATION,
+      ...(dto.source ? { source: dto.source } : {}),
       amountUnit: 'KOBO',
       eventId,
       eventTitle: event.title,
@@ -661,19 +716,14 @@ export class TransactionReferenceService {
     );
   }
 
-  async verifyAlatTransfer(
-    payload: any,
-    signature?: string,
-    rawBody?: Buffer,
-    opsKey?: string,
-  ) {
+  async verifyAlatTransfer(payload: any, signature?: string, rawBody?: Buffer) {
     const signatureVerified = this.alatCollectionService.verifyWebhookSignature(
       rawBody,
       signature,
     );
 
     if (!signatureVerified) {
-      this.assertOpsKey(opsKey);
+      throw new UnauthorizedException('Invalid ALAT webhook signature');
     }
 
     const reference =
@@ -774,8 +824,8 @@ export class TransactionReferenceService {
     return this.checkout.format(await this.checkout.cancel(id, userId));
   }
 
-  async refundQueue(opsKey?: string) {
-    this.assertOpsKey(opsKey);
+  async refundQueue(actor: DashboardActor) {
+    assertDashboardAccess(actor);
     return this.prisma.checkoutRefund.findMany({
       where: { status: { not: 'REFUNDED' } },
       include: {
@@ -792,8 +842,12 @@ export class TransactionReferenceService {
     });
   }
 
-  async confirmManualRefund(id: string, reference: string, opsKey?: string) {
-    this.assertOpsKey(opsKey);
+  async confirmManualRefund(
+    id: string,
+    reference: string,
+    actor: DashboardActor,
+  ) {
+    assertDashboardAccess(actor, DashboardRole.ADMIN);
     if (typeof reference !== 'string' || reference.trim().length < 3)
       throw new BadRequestException(
         'A confirmed provider refund reference is required.',
@@ -821,49 +875,25 @@ export class TransactionReferenceService {
     });
   }
 
-  async getRiskReviewQueue(dto: RiskReviewQueueQueryDto, opsKey?: string) {
-    this.assertOpsKey(opsKey);
+  async getRiskReviewQueue(
+    dto: RiskReviewQueueQueryDto,
+    actor: DashboardActor,
+  ) {
+    assertDashboardAccess(actor);
 
     const page = dto.page || 1;
     const pageSize = Math.min(dto.pageSize || 20, 50);
     const skip = (page - 1) * pageSize;
     const whereClause = this.buildRiskReviewQueueWhere(dto);
+    await this.wallet.refreshSettlementStatuses(
+      this.buildRiskReviewQueueWhere({ ...dto, settlementStatus: undefined }),
+    );
 
     const [transactions, total, reviewCount, holdCount, reviewedCount] =
       await Promise.all([
         this.prisma.transactionReference.findMany({
           where: whereClause,
-          include: {
-            user: {
-              select: {
-                id: true,
-                username: true,
-                fullName: true,
-                email: true,
-              },
-            },
-            creator: {
-              select: {
-                id: true,
-                username: true,
-                fullName: true,
-              },
-            },
-            event: {
-              select: {
-                id: true,
-                title: true,
-                creatorId: true,
-                creator: {
-                  select: {
-                    id: true,
-                    username: true,
-                    fullName: true,
-                  },
-                },
-              },
-            },
-          },
+          include: riskQueueInclude,
           orderBy: [{ riskScore: 'desc' }, { createdAt: 'asc' }],
           skip,
           take: pageSize,
@@ -873,22 +903,17 @@ export class TransactionReferenceService {
         }),
         this.prisma.transactionReference.count({
           where: {
-            ...whereClause,
-            riskStatus: RiskStatus.REVIEW,
+            AND: [whereClause, { riskStatus: RiskStatus.REVIEW }],
           },
         }),
         this.prisma.transactionReference.count({
           where: {
-            ...whereClause,
-            riskStatus: RiskStatus.HOLD,
+            AND: [whereClause, { riskStatus: RiskStatus.HOLD }],
           },
         }),
         this.prisma.transactionReference.count({
           where: {
-            ...whereClause,
-            reviewedAt: {
-              not: null,
-            },
+            AND: [whereClause, { reviewedAt: { not: null } }],
           },
         }),
       ]);
@@ -908,12 +933,40 @@ export class TransactionReferenceService {
     };
   }
 
+  async reviewTransactionRiskBatch(
+    dto: BatchReviewTransactionRiskDto,
+    actor: DashboardActor,
+  ) {
+    assertDashboardAccess(actor, DashboardRole.ADMIN);
+    const result: {
+      succeeded: string[];
+      failed: { id: string; message: string }[];
+    } = { succeeded: [], failed: [] };
+    for (const id of dto.transactionIds) {
+      try {
+        await this.reviewTransactionRisk(id, dto, actor);
+        result.succeeded.push(id);
+      } catch (error) {
+        if (!(error instanceof HttpException))
+          Logger.error(error, 'RiskBatchReview');
+        result.failed.push({
+          id,
+          message:
+            error instanceof HttpException
+              ? error.message
+              : 'Review could not be completed.',
+        });
+      }
+    }
+    return result;
+  }
+
   async reviewTransactionRisk(
     transactionId: string,
     dto: ReviewTransactionRiskDto,
-    opsKey?: string,
+    actor: DashboardActor,
   ) {
-    this.assertOpsKey(opsKey);
+    assertDashboardAccess(actor, DashboardRole.ADMIN);
 
     const transaction = await this.prisma.transactionReference.findUnique({
       where: { id: transactionId },
@@ -932,8 +985,15 @@ export class TransactionReferenceService {
       throw new NotFoundException('Transaction not found');
     }
 
-    if (transaction.status === TransactionStatusType.FAILED) {
-      throw new BadRequestException('Cannot review a failed transaction');
+    const reviewableStatuses: TransactionStatusType[] = [
+      TransactionStatusType.SUCCESS,
+      TransactionStatusType.PENDING,
+      TransactionStatusType.AWAITING_TRANSFER,
+    ];
+    if (!reviewableStatuses.includes(transaction.status)) {
+      throw new BadRequestException(
+        'Only successful or pending payments can be reviewed',
+      );
     }
 
     const lockedSettlementStatuses: SettlementStatus[] = [
@@ -954,10 +1014,10 @@ export class TransactionReferenceService {
 
     const creatorId =
       transaction.creatorId || transaction.event?.creatorId || null;
-    const nextSettlementStatus = await this.resolveSettlementStatus(
-      creatorId,
-      nextRiskStatus,
-    );
+    const nextSettlementStatus =
+      transaction.status === TransactionStatusType.SUCCESS
+        ? await this.resolveSettlementStatus(creatorId, nextRiskStatus)
+        : SettlementStatus.NOT_READY;
     const reviewedAt = new Date();
     const metadata = this.getMetadataObject(transaction.metadata);
     const reviewRecord = this.buildManualRiskReviewRecord(
@@ -970,29 +1030,71 @@ export class TransactionReferenceService {
     );
     const riskReviewHistory = this.getRiskReviewHistory(metadata);
 
-    const updatedTransaction = await this.prisma.transactionReference.update({
-      where: { id: transactionId },
-      data: {
-        riskStatus: nextRiskStatus,
-        settlementStatus: nextSettlementStatus,
-        reviewedAt,
-        metadata: this.asInputJson({
-          ...metadata,
-          lastRiskReview: reviewRecord,
-          riskReviewHistory: [...riskReviewHistory, reviewRecord],
-        }),
-      },
-      include: {
-        event: {
-          select: {
-            id: true,
-            title: true,
+    return this.prisma.$transaction(async (tx) => {
+      const updatedTransaction = await tx.transactionReference
+        .update({
+          where: {
+            id: transactionId,
+            updatedAt: transaction.updatedAt,
+            settlementStatus: { notIn: lockedSettlementStatuses },
+            status: { not: TransactionStatusType.FAILED },
           },
-        },
-      },
-    });
+          data: {
+            riskStatus: nextRiskStatus,
+            settlementStatus: nextSettlementStatus,
+            reviewedAt,
+            metadata: this.asInputJson({
+              ...metadata,
+              lastRiskReview: reviewRecord,
+              riskReviewHistory: [...riskReviewHistory, reviewRecord],
+            }),
+          },
+          include: {
+            event: {
+              select: {
+                id: true,
+                title: true,
+              },
+            },
+          },
+        })
+        .catch((error) => {
+          if (
+            error instanceof Prisma.PrismaClientKnownRequestError &&
+            error.code === 'P2025'
+          )
+            throw new ConflictException(
+              'Payment changed during review. Refresh before trying again.',
+            );
+          throw error;
+        });
 
-    return this.buildRiskReviewResponse(updatedTransaction);
+      if (creatorId) {
+        await this.wallet.refreshCreatorSettlementStatus(creatorId, tx);
+        const reconciled = await tx.transactionReference.findUniqueOrThrow({
+          where: { id: transactionId },
+          include: { event: { select: { id: true, title: true } } },
+        });
+        if (reconciled.settlementStatus !== nextSettlementStatus) {
+          const finalReview = {
+            ...reviewRecord,
+            nextSettlementStatus: reconciled.settlementStatus,
+          };
+          await tx.transactionReference.update({
+            where: { id: transactionId },
+            data: {
+              metadata: this.asInputJson({
+                ...this.getMetadataObject(reconciled.metadata),
+                lastRiskReview: finalReview,
+                riskReviewHistory: [...riskReviewHistory, finalReview],
+              }),
+            },
+          });
+        }
+        return this.buildRiskReviewResponse(reconciled);
+      }
+      return this.buildRiskReviewResponse(updatedTransaction);
+    });
   }
 
   async getTransactionStatus(id: string, userId: string) {
@@ -1262,6 +1364,12 @@ export class TransactionReferenceService {
     }
 
     const unavailableTickets: TicketAvailability[] = [];
+    let source: InitiateDonationDto['source'];
+    if (metadata.source === 'FOOD_BANK') source = 'FOOD_BANK';
+    else if (metadata.source !== undefined)
+      throw new BadRequestException(
+        'Invalid donation source in payment metadata',
+      );
     const donation = await this.donationService.createDonation(
       {
         eventId: metadata.eventId,
@@ -1269,6 +1377,7 @@ export class TransactionReferenceService {
         message: metadata.message,
         isAnonymous: metadata.isAnonymous,
         transactionId: transaction.id,
+        source,
       },
       transaction.userId,
       transaction.user.username ?? transaction.user.fullName ?? 'Someone',
@@ -1345,24 +1454,15 @@ export class TransactionReferenceService {
     };
   }
 
-  private formatRiskQueueTransaction(transaction: any) {
+  private formatRiskQueueTransaction(transaction: RiskQueueTransaction) {
     const metadata =
       transaction.metadata &&
       typeof transaction.metadata === 'object' &&
       !Array.isArray(transaction.metadata)
         ? (transaction.metadata as Record<string, any>)
         : {};
-    const grossAmountKobo = this.resolveBaseAmountKobo(
-      transaction.amount,
-      metadata,
-    );
-    const creatorPayableKobo =
-      Number(metadata?.pricing?.creatorPayableKobo || 0) ||
-      transaction.creatorPayable ||
-      Math.max(
-        grossAmountKobo - transaction.platformFee - transaction.providerFee,
-        0,
-      );
+    const grossAmountKobo = resolveGrossAmountKobo(transaction);
+    const creatorPayableKobo = resolveCreatorPayableKobo(transaction);
     const lastRiskReview = this.extractLatestRiskReview(transaction.metadata);
     const creator = transaction.creator ||
       transaction.event?.creator || {
@@ -1376,7 +1476,7 @@ export class TransactionReferenceService {
       transactionStatus: transaction.status,
       paymentType: this.resolvePaymentType(transaction.paymentType, metadata),
       paymentProvider: transaction.paymentProvider,
-      chargedAmount: transaction.amount / 100,
+      chargedAmount: resolveChargedAmountKobo(transaction) / 100,
       grossAmount: grossAmountKobo / 100,
       creatorPayable: creatorPayableKobo / 100,
       settlementStatus: transaction.settlementStatus,
@@ -2090,22 +2190,10 @@ export class TransactionReferenceService {
 
   private buildRiskReviewQueueWhere(dto: RiskReviewQueueQueryDto) {
     const whereClause: Prisma.TransactionReferenceWhereInput = {
-      riskStatus: dto.riskStatus
-        ? (dto.riskStatus as RiskStatus)
-        : {
-            in: [RiskStatus.REVIEW, RiskStatus.HOLD],
-          },
-      status: dto.transactionStatus
-        ? dto.transactionStatus
-        : {
-            in: [
-              TransactionStatusType.PENDING,
-              TransactionStatusType.AWAITING_TRANSFER,
-              TransactionStatusType.SUCCESS,
-            ],
-          },
+      ...(dto.riskStatus && { riskStatus: dto.riskStatus }),
+      ...(dto.transactionStatus && { status: dto.transactionStatus }),
       ...(dto.settlementStatus && {
-        settlementStatus: dto.settlementStatus as SettlementStatus,
+        settlementStatus: dto.settlementStatus,
       }),
       ...(dto.reviewed === true
         ? {
@@ -2120,6 +2208,28 @@ export class TransactionReferenceService {
           : {}),
     };
 
+    const userQuery = dto.userQuery?.trim();
+    if (userQuery) {
+      const user: Prisma.UserWhereInput = {
+        OR: [
+          { id: userQuery },
+          { username: { contains: userQuery, mode: 'insensitive' } },
+          { fullName: { contains: userQuery, mode: 'insensitive' } },
+          { email: { contains: userQuery, mode: 'insensitive' } },
+        ],
+      };
+      whereClause.AND =
+        dto.userRole === RiskUserRoleDto.CREATOR
+          ? [
+              {
+                OR: [
+                  { creator: { is: user } },
+                  { creatorId: null, event: { is: { creator: { is: user } } } },
+                ],
+              },
+            ]
+          : [{ user: { is: user } }];
+    }
     return whereClause;
   }
 
@@ -2270,14 +2380,6 @@ export class TransactionReferenceService {
     }
 
     return alatProfile;
-  }
-
-  private assertOpsKey(opsKey?: string) {
-    const internalOpsKey = process.env.INTERNAL_OPS_KEY;
-
-    if (!internalOpsKey || opsKey !== internalOpsKey) {
-      throw new UnauthorizedException('Invalid ops key');
-    }
   }
 
   private async buildAlatCustomerProfile(

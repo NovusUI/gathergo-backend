@@ -1,3 +1,8 @@
+import { assertFoodBankSettings } from '../food-bank/food-bank-settings';
+import { assertDashboardAccess } from '../dashboard-auth/dashboard-auth.policy';
+import type { DashboardActor } from '../dashboard-auth/dashboard-auth.types';
+import type { Event } from '@prisma/client';
+import { DashboardRole } from '@prisma/client';
 import { UserPreferenceService } from '../user-preference/user-preference.service';
 import { rankPreferenceEvent } from '../user-preference/interest-profile';
 import {
@@ -7,6 +12,7 @@ import {
 } from '../checkout/checkout-inventory';
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
   ForbiddenException,
@@ -101,6 +107,13 @@ export class EventService {
     dto: CreateEventDto,
     file?: Express.Multer.File,
   ) {
+    assertFoodBankSettings({
+      ...dto,
+      isPhysicalEvent: dto.isPhysicalEvent !== false,
+      reoccurring: dto.reoccurring ?? 'NONE',
+      startDate: new Date(dto.startDate),
+      endDate: new Date(dto.endDate),
+    });
     const donationsEnabled = this.resolveDonationsEnabled(
       dto.registrationType,
       dto.donationsEnabled,
@@ -184,6 +197,10 @@ export class EventService {
             dto.registrationType === 'registration'
               ? dto.registrationAttendees
               : null,
+          foodBankTotalMeals: dto.foodBankTotalMeals,
+          foodBankSlotCapacity: dto.foodBankSlotCapacity,
+          foodBankSlotMinutes: dto.foodBankSlotMinutes,
+          foodBankTimeZone: dto.foodBankTimeZone,
           donationTarget: donationsEnabled ? dto.donationTarget : null,
           donationsEnabled,
           volunteerRoles: dto.volunteerRoles
@@ -218,14 +235,37 @@ export class EventService {
     dto: UpdateEventDto,
     file?: Express.Multer.File,
   ) {
-    // 1) Fetch event first (auth + old image urls)
-    const existingEvent = await this.prisma.event.findUnique({
-      where: { id },
-    });
-    if (!existingEvent) throw new NotFoundException('Event not found');
+    const existingEvent = await this.loadEventForUpdate(id);
     if (existingEvent.creatorId !== userId)
       throw new ForbiddenException('Unauthorized');
+    return this.applyEventUpdate(existingEvent, dto, file);
+  }
 
+  async updateForDashboard(
+    id: string,
+    dto: UpdateEventDto,
+    actor: DashboardActor,
+    expectedUpdatedAt: Date,
+  ) {
+    assertDashboardAccess(actor, DashboardRole.ADMIN);
+    const event = await this.loadEventForUpdate(id);
+    return this.applyEventUpdate(event, dto, undefined, expectedUpdatedAt);
+  }
+
+  private async loadEventForUpdate(id: string) {
+    const event = await this.prisma.event.findUnique({ where: { id } });
+    if (!event) throw new NotFoundException('Event not found');
+    return event;
+  }
+
+  private async applyEventUpdate(
+    existingEvent: Event,
+    dto: UpdateEventDto,
+    file?: Express.Multer.File,
+    expectedUpdatedAt?: Date,
+  ) {
+    const id = existingEvent.id;
+    const userId = existingEvent.creatorId;
     try {
       const effectiveRegistrationType = existingEvent.registrationType;
       const effectiveReoccurring = dto.reoccurring ?? existingEvent.reoccurring;
@@ -240,6 +280,27 @@ export class EventService {
           where: { id },
           include: { _count: { select: { volunteerRoles: true } } },
         });
+        if (expectedUpdatedAt) {
+          if (currentEvent.updatedAt.getTime() !== expectedUpdatedAt.getTime())
+            throw new ConflictException(
+              'This event changed. Refresh it before saving.',
+            );
+          const start = dto.startDate
+            ? new Date(dto.startDate)
+            : currentEvent.startDate;
+          const end = dto.endDate
+            ? new Date(dto.endDate)
+            : currentEvent.endDate;
+          if (end <= start)
+            throw new BadRequestException('End date must be after start date.');
+          if (
+            (dto.isPhysicalEvent ?? currentEvent.isPhysicalEvent) &&
+            !(dto.location ?? currentEvent.location)?.trim()
+          )
+            throw new BadRequestException(
+              'Physical events require a location.',
+            );
+        }
         this.assertVolunteerOnlySettings(effectiveRegistrationType, dto);
         if (currentEvent._count.volunteerRoles > 0) {
           assertVolunteerEvent({
@@ -256,6 +317,50 @@ export class EventService {
                 : currentEvent.impactDescription,
           });
         }
+        assertFoodBankSettings({
+          ...currentEvent,
+          ...dto,
+          registrationType: effectiveRegistrationType,
+          isPhysicalEvent: dto.isPhysicalEvent ?? currentEvent.isPhysicalEvent,
+          foodBankTotalMeals:
+            dto.foodBankTotalMeals === undefined
+              ? currentEvent.foodBankTotalMeals
+              : dto.foodBankTotalMeals,
+          foodBankSlotCapacity:
+            dto.foodBankSlotCapacity === undefined
+              ? currentEvent.foodBankSlotCapacity
+              : dto.foodBankSlotCapacity,
+          foodBankSlotMinutes:
+            dto.foodBankSlotMinutes === undefined
+              ? currentEvent.foodBankSlotMinutes
+              : dto.foodBankSlotMinutes,
+          reoccurring: effectiveReoccurring,
+          startDate: dto.startDate
+            ? new Date(dto.startDate)
+            : currentEvent.startDate,
+          endDate: dto.endDate ? new Date(dto.endDate) : currentEvent.endDate,
+        });
+        if (
+          effectiveRegistrationType === 'foodbank' &&
+          ((dto.startDate !== undefined &&
+            new Date(dto.startDate).getTime() !==
+              currentEvent.startDate.getTime()) ||
+            (dto.endDate !== undefined &&
+              new Date(dto.endDate).getTime() !==
+                currentEvent.endDate.getTime()) ||
+            (dto.foodBankTotalMeals !== undefined &&
+              dto.foodBankTotalMeals !== currentEvent.foodBankTotalMeals) ||
+            (dto.foodBankSlotCapacity !== undefined &&
+              dto.foodBankSlotCapacity !== currentEvent.foodBankSlotCapacity) ||
+            (dto.foodBankSlotMinutes !== undefined &&
+              dto.foodBankSlotMinutes !== currentEvent.foodBankSlotMinutes) ||
+            (dto.foodBankTimeZone !== undefined &&
+              dto.foodBankTimeZone !== currentEvent.foodBankTimeZone)) &&
+          (await tx.mealPass.count({ where: { eventId: id } })) > 0
+        )
+          throw new BadRequestException(
+            'Use Manage collection to reschedule after passes are issued. Meal capacity and arrival settings cannot change.',
+          );
         const donationsEnabled = this.resolveDonationsEnabled(
           effectiveRegistrationType,
           dto.donationsEnabled ?? currentEvent.donationsEnabled,
@@ -297,7 +402,11 @@ export class EventService {
           startDate: dto.startDate ? new Date(dto.startDate) : undefined,
           endDate: dto.endDate ? new Date(dto.endDate) : undefined,
           isImageProcessing: file ? true : undefined,
-          donationsEnabled: dto.donationsEnabled,
+          foodBankTotalMeals: dto.foodBankTotalMeals,
+          foodBankSlotCapacity: dto.foodBankSlotCapacity,
+          foodBankSlotMinutes: dto.foodBankSlotMinutes,
+          foodBankTimeZone: dto.foodBankTimeZone,
+          donationsEnabled,
           donationTarget:
             dto.donationsEnabled === false ? null : dto.donationTarget,
         };
@@ -561,10 +670,16 @@ export class EventService {
     setting: boolean | undefined,
     donationTarget: number | undefined,
   ) {
-    if (registrationType === 'donation' && setting === false) {
+    if (
+      (registrationType === 'donation' || registrationType === 'foodbank') &&
+      setting === false
+    ) {
       throw new BadRequestException('Donation events must accept donations');
     }
-    const enabled = registrationType === 'donation' || setting === true;
+    const enabled =
+      registrationType === 'donation' ||
+      registrationType === 'foodbank' ||
+      setting === true;
     if (donationTarget !== undefined && !enabled) {
       throw new BadRequestException(
         'Enable donations before setting a donation target',

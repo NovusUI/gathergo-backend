@@ -1,3 +1,5 @@
+import { BadRequestException } from '@nestjs/common';
+import { assertFoodBankSettings } from '../food-bank/food-bank-settings';
 import { EVENT_CREATION_OPTIONAL_SECTIONS } from './event-creation-assistant.types';
 import type {
   EventCreationAssistantReply,
@@ -27,9 +29,24 @@ export function getRequiredEventSection(
   if (!draft.startDate || !draft.endDate) return 'Date and Time';
   if (
     draft.isPhysicalEvent === undefined ||
+    (draft.registrationType === 'foodbank' && !draft.isPhysicalEvent) ||
     (draft.isPhysicalEvent && !draft.location)
   )
     return 'Location';
+  if (draft.registrationType === 'foodbank') {
+    try {
+      assertFoodBankSettings({
+        ...draft,
+        isPhysicalEvent: true,
+        reoccurring: 'NONE',
+        startDate: new Date(draft.startDate),
+        endDate: new Date(draft.endDate),
+      });
+    } catch (error) {
+      if (error instanceof BadRequestException) return 'Pricing';
+      throw error;
+    }
+  }
   if (
     draft.registrationType === 'registration' &&
     (draft.registrationFee === undefined ||
@@ -70,6 +87,8 @@ export function getOptionalEventSection(
     !(draft.impactDescription && draft.hasImpactGoalOrPath)
   )
     next = 'Interests';
+  else if (!addressedSections.includes('Cover') && !draft.hasCoverImage)
+    next = 'Cover';
   return next;
 }
 
@@ -80,10 +99,15 @@ export function guideEventCreationReply(
 ): EventCreationAssistantReply {
   const required = getRequiredEventSection(draft);
   if (required) {
+    const needsFoodBankEditor =
+      draft.registrationType === 'foodbank' &&
+      (required === 'Location' || required === 'Pricing') &&
+      result.section !== required;
     const optional = EVENT_CREATION_OPTIONAL_SECTIONS.some(
       (section) => section === result.section,
     );
     if (
+      !needsFoodBankEditor &&
       !(
         draft.registrationType === 'volunteer' && result.section === 'Pricing'
       ) &&
@@ -94,12 +118,17 @@ export function guideEventCreationReply(
     return {
       ...result,
       reply:
-        required === 'Impact story' && draft.registrationType === 'volunteer'
-          ? 'What will this volunteer event contribute?'
-          : required === 'Volunteering' &&
-              draft.registrationType === 'volunteer'
-            ? 'What role can volunteers help with?'
-            : QUESTIONS[required],
+        required === 'Location' && draft.registrationType === 'foodbank'
+          ? 'Where will people collect their meals?'
+          : required === 'Pricing' && draft.registrationType === 'foodbank'
+            ? 'How should meal collection work?'
+            : required === 'Impact story' &&
+                draft.registrationType === 'volunteer'
+              ? 'What will this volunteer event contribute?'
+              : required === 'Volunteering' &&
+                  draft.registrationType === 'volunteer'
+                ? 'What role can volunteers help with?'
+                : QUESTIONS[required],
       choices: [],
       section: required,
     };

@@ -1,4 +1,9 @@
 import {
+  CurrentDashboard,
+  DashboardAccess,
+} from 'src/modules/dashboard-auth/dashboard-access';
+import type { DashboardSessionContext } from 'src/modules/dashboard-auth/dashboard-auth.types';
+import {
   Body,
   Controller,
   Get,
@@ -30,6 +35,7 @@ import {
 } from './dto/payment-provider.dto';
 import { RiskReviewQueueQueryDto } from './dto/risk-review-queue.dto';
 import { ReviewTransactionRiskDto } from './dto/review-transaction-risk.dto';
+import { BatchReviewTransactionRiskDto } from './dto/batch-review-transaction-risk.dto';
 
 @Controller('transaction-reference')
 @ApiTags('Transaction References')
@@ -124,7 +130,6 @@ export class TransactionReferenceController {
   @ApiOperation({ summary: 'Verify ALAT transfer collection' })
   async verifyAlatTransaction(
     @Headers('x-alat-signature') signature: string,
-    @Headers('x-ops-key') opsKey: string,
     @Req() req: any,
     @Body() body: any,
   ) {
@@ -132,38 +137,52 @@ export class TransactionReferenceController {
       body,
       signature,
       req?.rawBody,
-      opsKey,
     );
   }
 
   @Get('internal/risk-queue')
-  @Public()
+  @DashboardAccess('read')
   @ApiOperation({ summary: 'Internal risk review queue endpoint' })
   async getRiskReviewQueue(
-    @Headers('x-ops-key') opsKey: string,
+    @CurrentDashboard() session: DashboardSessionContext,
     @Query() dto: RiskReviewQueueQueryDto,
   ) {
     return {
       data: await this.transactionReferenceService.getRiskReviewQueue(
         dto,
-        opsKey,
+        session.user,
       ),
     };
   }
 
+  @Post('internal/risk-reviews')
+  @DashboardAccess('admin')
+  @ApiOperation({
+    summary: 'Review up to 50 selected payments, reporting each outcome',
+  })
+  async reviewTransactionRiskBatch(
+    @CurrentDashboard() session: DashboardSessionContext,
+    @Body() dto: BatchReviewTransactionRiskDto,
+  ) {
+    return this.transactionReferenceService.reviewTransactionRiskBatch(
+      dto,
+      session.user,
+    );
+  }
+
   @Post('internal/:id/risk-review')
-  @Public()
+  @DashboardAccess('admin')
   @ApiOperation({ summary: 'Internal transaction risk review endpoint' })
   @ApiParam({ name: 'id', description: 'Transaction reference ID' })
   async reviewTransactionRisk(
     @Param('id') id: string,
-    @Headers('x-ops-key') opsKey: string,
+    @CurrentDashboard() session: DashboardSessionContext,
     @Body() dto: ReviewTransactionRiskDto,
   ) {
     return this.transactionReferenceService.reviewTransactionRisk(
       id,
       dto,
-      opsKey,
+      session.user,
     );
   }
 
@@ -173,22 +192,22 @@ export class TransactionReferenceController {
   }
 
   @Get('internal/refunds')
-  @Public()
-  refundQueue(@Headers('x-ops-key') opsKey: string) {
-    return this.transactionReferenceService.refundQueue(opsKey);
+  @DashboardAccess('read')
+  refundQueue(@CurrentDashboard() session: DashboardSessionContext) {
+    return this.transactionReferenceService.refundQueue(session.user);
   }
 
   @Post('internal/:id/refund-confirmation')
-  @Public()
+  @DashboardAccess('admin')
   confirmRefund(
     @Param('id') id: string,
-    @Headers('x-ops-key') opsKey: string,
+    @CurrentDashboard() session: DashboardSessionContext,
     @Body('reference') reference: string,
   ) {
     return this.transactionReferenceService.confirmManualRefund(
       id,
       reference,
-      opsKey,
+      session.user,
     );
   }
 

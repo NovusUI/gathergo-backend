@@ -1,3 +1,4 @@
+import { WalletModule } from '../wallet/wallet.module';
 import { CheckoutService } from '../checkout/checkout.service';
 import { CheckoutWorker } from '../checkout/checkout.worker';
 import { Module } from '@nestjs/common';
@@ -17,6 +18,7 @@ import { AlatCollectionService } from './alat-collection.service';
 @Module({
   imports: [
     PrismaModule,
+    WalletModule,
     MailModule,
     DonationModule,
     TicketModule,

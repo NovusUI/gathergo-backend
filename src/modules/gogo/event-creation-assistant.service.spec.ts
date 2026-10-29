@@ -23,6 +23,7 @@ const request = (): EventCreationAssistantDto => ({
     volunteerRoleCount: 0,
     impactMapCount: 0,
     hasImpactGoalOrPath: false,
+    hasCoverImage: false,
   },
 });
 const validReply: EventCreationAssistantReply = {
@@ -49,6 +50,7 @@ function completeDraft(): EventCreationAssistantDto['draft'] {
     registrationType: 'registration',
     registrationFee: 0,
     registrationAttendees: 25,
+    hasCoverImage: true,
   };
 }
 
@@ -168,6 +170,44 @@ describe('Gogo event creation', () => {
       'Interests',
     ];
     expect((await service.reply(dto)).section).toBe('Review');
+  });
+  it('invites the cover picker before review and accepts a natural-language skip', async () => {
+    const dto = request();
+    dto.draft = { ...completeDraft(), hasCoverImage: false };
+    dto.addressedSections = ['Impact story', 'Links', 'Interests'];
+    respond({ ...validReply, section: 'Review', updates: {} });
+    expect(await service.reply(dto)).toMatchObject({
+      section: 'Cover',
+      reply: 'Would you like to add a cover image?',
+      choices: [],
+    });
+    const body = post.mock.calls[0][1] as { messages: { content: string }[] };
+    expect(JSON.parse(body.messages[1].content)).toMatchObject({
+      currentSection: 'Cover',
+      currentOptionalSection: 'Cover',
+      draft: { hasCoverImage: false },
+    });
+    dto.messages.push({ role: 'user', content: 'Skip the image for now' });
+    respond({
+      ...validReply,
+      section: 'Review',
+      completedSection: 'Cover',
+      updates: {},
+    });
+    expect(await service.reply(dto)).toMatchObject({
+      section: 'Review',
+      completedSection: 'Cover',
+    });
+  });
+  it('requires an actual boolean for the image-selection flag', async () => {
+    for (const hasCoverImage of [undefined, 'true']) {
+      const dto = request();
+      Object.assign(dto.draft, { hasCoverImage });
+      await expect(service.reply(dto)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    }
+    expect(post).not.toHaveBeenCalled();
   });
   it.each([
     'not json',
@@ -511,6 +551,68 @@ describe('Gogo event creation', () => {
       impactDescription: 'Plant trees.',
     };
     expect((await service.reply(dto)).updates.donationsEnabled).toBe(true);
+    dto.draft.registrationType = 'foodbank';
+    expect((await service.reply(dto)).updates.donationsEnabled).toBe(true);
+  });
+  it('extracts food bank collection facts in one draft patch and retains them in later requests', async () => {
+    const dto = request();
+    dto.draft.registrationType = 'foodbank';
+    dto.messages = [
+      {
+        role: 'user',
+        content:
+          'Share 100 meals at Lagos park on 3 February 2035, 25 people every 30 minutes from 9 to 11 UTC.',
+      },
+    ];
+    const updates = {
+      title: 'Lagos community table',
+      description: 'Share meals with neighbours at Lagos park.',
+      location: 'Lagos park',
+      startDate: '2035-02-03T09:00:00Z',
+      endDate: '2035-02-03T11:00:00Z',
+      foodBankTotalMeals: 100,
+      foodBankSlotCapacity: 25,
+      foodBankSlotMinutes: 30,
+    };
+    respond({ ...validReply, updates, section: 'Impact story' });
+    const reply = await service.reply(dto);
+    expect(reply.updates).toEqual(updates);
+    expect(reply.section).toBe('Impact story');
+    dto.draft = { ...dto.draft, ...updates };
+    respond({ ...validReply, updates: {}, section: 'Impact story' });
+    await service.reply(dto);
+    const body = post.mock.calls[1][1] as { messages: { content: string }[] };
+    expect(JSON.parse(body.messages[1].content)).toMatchObject({
+      draft: updates,
+    });
+    expect(body.messages[0].content).toContain(
+      'Food bank events are ALWAYS physical',
+    );
+    expect(body.messages[0].content).toContain(
+      'Never invent meal totals or window sizes',
+    );
+  });
+  it.each([
+    { foodBankTotalMeals: 0 },
+    { foodBankTotalMeals: 1000001 },
+    { foodBankSlotCapacity: 1.5 },
+    { foodBankSlotCapacity: 10001 },
+    { foodBankSlotMinutes: 4 },
+    { foodBankSlotMinutes: 121 },
+    { isPhysicalEvent: false },
+  ])('rejects an invalid food bank update %j', async (updates) => {
+    const dto = request();
+    dto.draft.registrationType = 'foodbank';
+    respond({ ...validReply, updates });
+    await expect(service.reply(dto)).rejects.toBeInstanceOf(
+      BadGatewayException,
+    );
+  });
+  it('rejects collection settings on ordinary events', async () => {
+    respond({ ...validReply, updates: { foodBankTotalMeals: 100 } });
+    await expect(service.reply(request())).rejects.toBeInstanceOf(
+      BadGatewayException,
+    );
   });
   it.each(['www.example.com/event', 'ftp://example.com', 'https://bad link'])(
     'reports a draft link error before calling the provider (%s)',

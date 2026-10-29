@@ -296,7 +296,7 @@ Paid checkouts reserve capacity for `CHECKOUT_HOLD_SECONDS` (default 300 seconds
 
 The scheduled checkout worker retries confirmation delivery and refunds. Admissions, sold counts, payment state, and the confirmation job commit together. Email queue jobs have deterministic IDs; feed/notification delivery remains at least once. Webhook inbox records are marked processed only after fulfillment commits and remain retryable on failure.
 
-Paystack refunds are submitted once, then reconciled against its documented refund API. An ambiguous timeout requires reconciliation or an operator; it never triggers another automatic refund POST. ALAT refunds require operations handling because no verified refund API is integrated. With `x-ops-key: INTERNAL_OPS_KEY`, list outstanding refunds at `GET /transaction-reference/internal/refunds`. Refund through the provider first, then confirm a `MANUAL_REQUIRED` refund at `POST /transaction-reference/internal/:id/refund-confirmation` with `{ "reference": "actual-provider-refund-reference" }`. `REFUNDED` means provider completion was confirmed, rather than merely queued.
+Paystack refunds are submitted once, then reconciled against its documented refund API. An ambiguous timeout requires reconciliation or an operator; it never triggers another automatic refund POST. ALAT refunds require operations handling because no verified refund API is integrated. With a dashboard session (`Authorization: Bearer <token>`), list outstanding refunds at `GET /transaction-reference/internal/refunds`. An administrator must refund through the provider first, then confirm a `MANUAL_REQUIRED` refund at `POST /transaction-reference/internal/:id/refund-confirmation` with `{ "reference": "actual-provider-refund-reference" }`. `REFUNDED` means provider completion was confirmed, rather than merely queued.
 
 Roll out migration `20261017120000_checkout_reservations`, regenerate Prisma, and deploy backend/mobile together (older clients do not send checkout keys). The migration preserves historical admissions, assigns fulfillment identities, reconciles sold counts, and counts existing sponsored seats. Historical duplicates and oversold events require manual review; it does not delete admissions or raise event capacity. No live migration is performed by the checkout tests.
 
@@ -308,6 +308,13 @@ Replies include a required nullable `suggestedImpactStory` (at most 180
 characters), separate from applied draft updates. The app displays that proposal
 in the conversation and writes it into the draft only when the organiser accepts
 or opens it for manual editing. Location and fundraising setup render inline.
+
+Food bank drafts use `registrationType=foodbank` with `eventType=general`.
+Gogo extracts `foodBankTotalMeals`, `foodBankSlotCapacity`, and
+`foodBankSlotMinutes` alongside the title, description, venue, and collection
+hours. Collection setup uses the inline `Pricing` editor and must accommodate
+all meals before optional steps or review. Food banks remain physical; the
+model cannot switch them online. Donations and a fundraising target are optional.
 
 ### Personal interest map
 
@@ -372,6 +379,92 @@ from the current Prisma model, and remove that schema when finished.
 
 Run the chat database tests against an isolated local database whose name contains `chat_delivery_test`: `CHAT_TEST_DATABASE_URL=... npm test -- --runInBand --runTestsByPath src/modules/message/message.integration.spec.ts src/modules/message/message.gateway.spec.ts`. These tests exercise concurrent sends and actual Socket.IO acknowledgment frames; Redis and push delivery are isolated from external services.
 
-Push notifications select Gogo audio in `notification-sounds.ts`: carpool requests/acceptances use the positive clip, rejected requests use the rejection clip, `FEED_FRENZY_*` and feed notifications marked `isMilestone: true` use the celebration clip, and other notifications (including chat) use general audio. Expo and direct FCM payloads use matching `gogo_*_v1` Android channels and bundled WAV filenames for iOS; FCM data values are serialized as strings. Direct FCM regular notifications use the existing chunked sender rather than only constructing an unsent payload.
+Push notifications select Gogo audio in `notification-sounds.ts`: carpool requests/acceptances use the positive clip, rejected requests and passenger removals use the rejection clip, `FEED_FRENZY_*` and feed notifications marked `isMilestone: true` use the celebration clip, and other notifications (including chat) use general audio. Expo and direct FCM payloads use matching `gogo_*_v1` Android channels and bundled WAV filenames for iOS; FCM data values are serialized as strings. Direct FCM regular notifications use the existing chunked sender rather than only constructing an unsent payload.
+
+Carpool details retain declined and removed passenger requests as history. Declined riders may submit a new request; removed riders receive HTTP 403 and cannot request the same ride again. Pending or accepted requests return an error instead of a successful duplicate response. Request, decline, and removal notifications link to the carpool page; acceptance and message notifications still link to chat. Only an accepted passenger can be removed, and declining a request does not publish a passenger-added event.
+
+`GET /carpool/:id` includes `isFollowingRequester` and `isFollowedByRequester` on each passenger request, relative to the authenticated viewer. Request cards use these flags for Following, Follower, or Mutual follow tags beneath the rider's photo. Both flags are false when there is no follow relationship.
 
 Release with the mobile sound assets/config and a rebuilt native app. Open the new app to register its channels before verifying remote playback. Older binaries do not contain the custom resources; an OTA update alone cannot install them. No new notification triggers or API controls were introduced.
+
+## Dashboard authentication
+
+The operations dashboard uses separate username/password accounts with revocable 8-hour sessions. Regular users have read-only access; admins resolve KYC/payout/risk reviews, record refunds and settlements, and manage dashboard accounts. The shared ops key is removed. Apply migration `20261026220000_dashboard_auth`, regenerate Prisma, then create the initial admin using `npm run dashboard:bootstrap` in a trusted administrative checkout. See [dashboard authentication setup and contracts](docs/dashboard-auth.md) for bootstrap variables, temporary-password changes, account management and rollout requirements. ALAT transfer webhooks require a valid provider signature.
+
+## Food bank events
+
+Apply `20261027120000_food_bank` and `20261028140000_flexible_food_bank_collection`,
+then regenerate Prisma Client before deploying.
+Food bank creation requires a physical venue, one non-recurring collection date
+range, and foodBankTotalMeals, foodBankSlotCapacity, foodBankSlotMinutes (5–120).
+Collection hours must accommodate all meals. Donations are always enabled.
+Meal capacity, arrival window settings and timezone lock after the first pass.
+Use the dedicated reschedule endpoint to move issued passes to a new schedule.
+
+Authenticated routes are `POST /events/:eventId/food-bank/claim`,
+`GET /events/:eventId/food-bank/me`, and `GET /food-bank/my-passes`.
+Claiming returns one entitlement per person/event; the read route returns null
+when no pass exists. Passes expose id, createdAt, eventId, qrCode,
+collectionStart, collectionEnd, isUsed and timeZone. No payment source or amount is exposed.
+
+Allocation uses the existing event database lock and database clock, caps each
+window and the total inventory, and has a unique event/user constraint. The
+scanner supports meal passes; authorised staff record collection once while the
+organiser has opened collection on the scheduled local date range. Arrival
+windows are advisory: early and late arrivals remain eligible while open,
+including after the planned closing time on that day. Opening before the first
+local day or after the final local day is blocked. Capacity paces bookings; it
+does not measure physical crowd density. New reservations still use planned hours.
+
+`GET /events/:eventId/food-bank/collection` returns status, availability, timeZone,
+startDate, endDate, updatedAt, canManage, canOpen and canReserve. Only the organiser
+can `PATCH` that route with `{status: OPEN|PAUSED|CLOSED, expectedUpdatedAt}`.
+New and existing foodbanks start as NOT_STARTED; organisers explicitly start them.
+New mobile-created banks save the creator's timezone. Existing banks use Africa/Lagos.
+
+`POST /events/:eventId/food-bank/reschedule` takes `{startDate, expectedUpdatedAt}`.
+Pause or close first. It preserves duration, shifts unused arrival windows in one
+transaction, retains pass IDs/QR codes and leaves collected passes unchanged.
+Unused pass holders receive the existing in-app/push notification flow after commit.
+The response adds notificationFailed; delivery errors are visible to the organiser
+without misreporting a committed reschedule as failed. All collection mutations
+share the allocation event lock, and stale revisions are rejected.
+
+Meal scans include `mealCollection` with collectionStart, collectionEnd, timeZone,
+status (`upcoming`, `not_started`, `ready`, `paused`, `closed`, `ended`, `collected`)
+and advisory arrival (`early`, `on_time`, `late`). Scanner permission (canMarkUsed)
+is independent of availability; confirmation requires both isValid and permission.
+
+Donation initiation accepts optional `source: FOOD_BANK` only for food banks.
+The existing payment and donation feed flow retains that metadata. Verified
+payment fulfilment and meal entitlement share one transaction. First donations
+receive a pass while windows remain available; additional donations reuse the
+same entitlement. Full or closed banks can still receive donations. Duplicate
+callbacks reuse the donation, and claims without donations create no synthetic
+financial transaction.
+
+Verify with `npm test -- --runInBand food-bank event.service.spec
+ event-dashboard-edit transaction-reference.service.spec` and `npm run build`.
+
+## Short links
+
+Apply migration `20261027160000_short_links` and regenerate Prisma Client.
+`POST /api/v1/share-links` requires authentication and accepts
+`{ kind: "event" | "foodbank" | "carpool", targetId: "<UUID-v4>" }`.
+It verifies the actual destination and reuses its stable mapping. Food-bank
+links require a food-bank event; deleted carpools cannot be shared. Eight-character
+codes use random bytes encoded as base64url, with unique constraints on both code
+and `(kind, targetId)`. Concurrent requests return the existing winner; random
+code collisions retry without overwriting another mapping.
+
+`GET /api/v1/share-links/:code` is public and returns the saved mapping in the
+normal response envelope. Missing or deleted destinations return 404. The public
+`GET /s/:code` route is excluded from the API prefix and redirects to the matching
+full event, food-bank or carpool page on `https://gathergo.events`. It accepts no
+arbitrary redirect URL. Codes remain reserved when targets disappear.
+
+The branded website must forward `/s/*` to this backend handler; its other pages
+stay with the existing web host. DNS and Apple/Android app-link association must
+cover the branded host and new path. No production migration or hosting change is
+performed by the implementation. Focused checks:
+`npm test -- --runInBand short-links` and `npm run build`.

@@ -39,6 +39,7 @@ export class FeedIntegrationService {
     amount: number,
     isAnonymous: boolean = false,
     supportMessage?: string | null,
+    source?: 'FOOD_BANK',
   ) {
     return this.feedService.generateDonationFeed(
       eventId,
@@ -47,6 +48,7 @@ export class FeedIntegrationService {
       isAnonymous,
       userId,
       supportMessage,
+      source,
     );
   }
 

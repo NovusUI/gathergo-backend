@@ -708,6 +708,7 @@ export class FeedService {
     isAnonymous: boolean = false,
     userId?: string,
     supportMessage?: string | null,
+    source?: 'FOOD_BANK',
   ) {
     await this.trackActivityForFrenzy(eventId, 'DONATION');
 
@@ -760,6 +761,7 @@ export class FeedService {
       content,
       metadata: {
         donationId,
+        ...(source ? { source } : {}),
         amount,
         amountInNaira,
         isAnonymous,

@@ -1,4 +1,8 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { internalEventSelect } from '../internal-event.types';
+import { formatInternalEvent } from '../internal-event.format';
+import { assertDashboardAccess } from 'src/modules/dashboard-auth/dashboard-auth.policy';
+import type { DashboardActor } from 'src/modules/dashboard-auth/dashboard-auth.types';
+import { Injectable } from '@nestjs/common';
 import { PaymentType, Prisma, TransactionStatusType } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { formatPayment } from 'src/utils';
@@ -7,7 +11,6 @@ import { impactEventWhere } from '../../event/event-impact.util';
 import {
   summarizeVolunteering,
   volunteerEventMetrics,
-  volunteerSummaryInclude,
 } from '../../volunteer/volunteer.util';
 import {
   eventDashboardInclude,
@@ -35,9 +38,9 @@ export class DashboardService {
 
   async getInternalOverview(
     dto: InternalAdminOverviewQueryDto,
-    opsKey?: string,
+    actor: DashboardActor,
   ) {
-    this.assertOpsKey(opsKey);
+    assertDashboardAccess(actor);
 
     const now = new Date();
     const upcomingLimit = Math.min(dto.upcomingLimit || 6, 12);
@@ -137,44 +140,7 @@ export class DashboardService {
         },
         orderBy: [{ startDate: 'asc' }, { createdAt: 'desc' }],
         take: upcomingLimit,
-        select: {
-          id: true,
-          title: true,
-          registrationType: true,
-          ...volunteerSummaryInclude,
-          location: true,
-          startDate: true,
-          endDate: true,
-          donationTarget: true,
-          registrationAttendees: true,
-          registrationFee: true,
-          creator: {
-            select: {
-              id: true,
-              username: true,
-              fullName: true,
-              email: true,
-            },
-          },
-          eventTickets: {
-            select: {
-              sold: true,
-              quantity: true,
-              price: true,
-            },
-          },
-          donations: {
-            select: {
-              amount: true,
-              status: true,
-            },
-          },
-          Registration: {
-            select: {
-              id: true,
-            },
-          },
-        },
+        select: internalEventSelect,
       }),
       this.prisma.transactionReference.findMany({
         where: {
@@ -257,21 +223,9 @@ export class DashboardService {
           ),
         },
       ],
-      upcomingEvents: upcomingEvents.map((event) => {
-        const formatted = this.formatInternalOverviewEvent(event, now);
-        if (event.registrationType === 'volunteer') {
-          const metrics = volunteerEventMetrics(event);
-          return {
-            ...formatted,
-            volunteering: metrics.volunteering,
-            participants: metrics.participants,
-            grossAmount: metrics.raised,
-            goalAmount: metrics.goal,
-            progress: metrics.progress,
-          };
-        }
-        return { ...formatted, volunteering: summarizeVolunteering(event) };
-      }),
+      upcomingEvents: upcomingEvents.map((event) =>
+        formatInternalEvent(event, now),
+      ),
       recentActivity: recentActivity.map((transaction) =>
         this.formatInternalActivity(transaction),
       ),
@@ -535,73 +489,6 @@ export class DashboardService {
     };
   }
 
-  private formatInternalOverviewEvent(event: any, now: Date) {
-    let grossAmount = 0;
-    let participants = 0;
-    let goalAmount = 0;
-
-    switch (event.registrationType) {
-      case 'ticket':
-        grossAmount = event.eventTickets.reduce(
-          (sum: number, ticket: any) => sum + ticket.sold * ticket.price,
-          0,
-        );
-        participants = event.eventTickets.reduce(
-          (sum: number, ticket: any) => sum + ticket.sold,
-          0,
-        );
-        goalAmount = event.eventTickets.reduce(
-          (sum: number, ticket: any) => sum + ticket.quantity * ticket.price,
-          0,
-        );
-        break;
-      case 'donation':
-        grossAmount =
-          event.donations.reduce(
-            (sum: number, donation: any) => sum + donation.amount,
-            0,
-          ) / 100;
-        participants = event.donations.length;
-        goalAmount = event.donationTarget || 0;
-        break;
-      case 'registration':
-        participants = event.Registration.length;
-        grossAmount = participants * (event.registrationFee || 0);
-        goalAmount =
-          (event.registrationAttendees || 0) * (event.registrationFee || 0);
-        break;
-      default:
-        break;
-    }
-
-    const progress =
-      goalAmount > 0
-        ? Math.min(Math.round((grossAmount / goalAmount) * 100), 100)
-        : 0;
-    const status =
-      event.startDate <= now && event.endDate >= now ? 'LIVE' : 'UPCOMING';
-
-    return {
-      id: event.id,
-      title: event.title,
-      registrationType: event.registrationType,
-      location: event.location || null,
-      startDate: event.startDate,
-      endDate: event.endDate,
-      status,
-      participants,
-      grossAmount,
-      goalAmount,
-      progress,
-      creator: {
-        id: event.creator.id,
-        username: event.creator.username,
-        fullName: event.creator.fullName,
-        email: event.creator.email,
-      },
-    };
-  }
-
   private formatInternalActivity(transaction: any) {
     return {
       id: transaction.id,
@@ -635,13 +522,5 @@ export class DashboardService {
 
   private toCurrencyAmount(amountKobo: number) {
     return amountKobo / 100;
-  }
-
-  private assertOpsKey(opsKey?: string) {
-    const internalOpsKey = process.env.INTERNAL_OPS_KEY;
-
-    if (!internalOpsKey || opsKey !== internalOpsKey) {
-      throw new UnauthorizedException('Invalid ops key');
-    }
   }
 }

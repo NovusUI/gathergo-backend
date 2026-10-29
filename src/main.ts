@@ -3,7 +3,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ResponseInterceptor } from './common/interceptors/response.interceptors';
-import { ValidationPipe } from '@nestjs/common';
+import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { createCorsOriginValidator, getPort } from './config/runtime-env';
 
 async function bootstrap() {
@@ -12,7 +12,9 @@ async function bootstrap() {
   });
   const port = getPort();
 
-  app.setGlobalPrefix('api/v1');
+  app.setGlobalPrefix('api/v1', {
+    exclude: [{ path: 's/:code', method: RequestMethod.GET }],
+  });
   app.enableShutdownHooks();
   app.set('trust proxy', 1);
   // Swagger configuration
@@ -41,12 +43,7 @@ async function bootstrap() {
     origin: createCorsOriginValidator(),
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: [
-      'Authorization',
-      'Content-Type',
-      'x-ops-key',
-      'Idempotency-Key',
-    ],
+    allowedHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
   });
 
   await app.listen(port, '0.0.0.0');

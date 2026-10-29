@@ -1,3 +1,8 @@
+import { EventModule } from '../event/event.module';
+import { InternalEventsController } from './controllers/internal-events.controller';
+import { InternalEventsService } from './services/internal-events.service';
+import { CreatorsController } from './controllers/creators.controller';
+import { CreatorsService } from './services/creators.service';
 import { Module } from '@nestjs/common';
 import { DashboardController } from './controllers/dashboard.controller';
 import { EventsDashboardController } from './controllers/events-dashboard.controller';
@@ -12,8 +17,10 @@ import { QuickAccessController } from './controllers/quick-access.controller';
 import { QuickAccessService } from './services/quick-access.service';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, EventModule],
   controllers: [
+    InternalEventsController,
+    CreatorsController,
     DashboardController,
     EventsDashboardController,
     PaymentsController,
@@ -21,6 +28,8 @@ import { QuickAccessService } from './services/quick-access.service';
     QuickAccessController,
   ],
   providers: [
+    InternalEventsService,
+    CreatorsService,
     DashboardService,
     EventsDashboardService,
     PaymentsService,

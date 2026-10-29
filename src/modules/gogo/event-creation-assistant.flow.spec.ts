@@ -23,6 +23,7 @@ const complete: EventCreationDraft = {
   volunteerRoleCount: 0,
   impactMapCount: 0,
   hasImpactGoalOrPath: false,
+  hasCoverImage: true,
 };
 const reply: EventCreationAssistantReply = {
   reply: 'Ready to review?',
@@ -34,6 +35,91 @@ const reply: EventCreationAssistantReply = {
 };
 
 describe('Gogo guided event steps', () => {
+  it('invites a cover before review and advances after selecting or skipping it', () => {
+    const draft = { ...complete, hasCoverImage: false };
+    const addressed: EventCreationOptionalSection[] = [
+      'Impact story',
+      'Links',
+      'Interests',
+    ];
+    expect(guideEventCreationReply(reply, draft, addressed)).toMatchObject({
+      section: 'Cover',
+      reply: 'Would you like to add a cover image?',
+      choices: [],
+    });
+    expect(
+      getOptionalEventSection({ ...draft, hasCoverImage: true }, addressed),
+    ).toBe('Review');
+    expect(getOptionalEventSection(draft, [...addressed, 'Cover'])).toBe(
+      'Review',
+    );
+  });
+  it('still offers a cover when impact selections skip the interests invitation', () => {
+    expect(
+      getOptionalEventSection(
+        {
+          ...complete,
+          hasCoverImage: false,
+          impactDescription: 'Restore the neighbourhood park.',
+          impactMapCount: 1,
+          hasImpactGoalOrPath: true,
+        },
+        ['Impact story', 'Impact map', 'Links'],
+      ),
+    ).toBe('Cover');
+  });
+  const foodBank: EventCreationDraft = {
+    ...complete,
+    registrationType: 'foodbank',
+    foodBankTotalMeals: 100,
+    foodBankSlotCapacity: 25,
+    foodBankSlotMinutes: 30,
+  };
+  it.each([
+    'foodBankTotalMeals',
+    'foodBankSlotCapacity',
+    'foodBankSlotMinutes',
+  ] as const)(
+    'requires %s before inviting optional food bank steps',
+    (field) => {
+      const draft = { ...foodBank, [field]: undefined };
+      expect(getRequiredEventSection(draft)).toBe('Pricing');
+      expect(guideEventCreationReply(reply, draft, []).reply).toBe(
+        'How should meal collection work?',
+      );
+    },
+  );
+  it('requires a collection venue and enough windows for all meals', () => {
+    expect(getRequiredEventSection({ ...foodBank, location: undefined })).toBe(
+      'Location',
+    );
+    expect(
+      getRequiredEventSection({ ...foodBank, isPhysicalEvent: false }),
+    ).toBe('Location');
+    expect(
+      getRequiredEventSection({ ...foodBank, foodBankTotalMeals: 101 }),
+    ).toBe('Pricing');
+    expect(
+      guideEventCreationReply(
+        { ...reply, section: null, choices: ['In person', 'Online'] },
+        { ...foodBank, location: undefined },
+        [],
+      ),
+    ).toMatchObject({ section: 'Location', choices: [] });
+  });
+  it('allows food banks to skip impact and interests after collection setup', () => {
+    expect(getRequiredEventSection(foodBank)).toBeNull();
+    expect(guideEventCreationReply(reply, foodBank, []).section).toBe(
+      'Impact story',
+    );
+    expect(
+      guideEventCreationReply(reply, foodBank, [
+        'Impact story',
+        'Links',
+        'Interests',
+      ]).section,
+    ).toBe('Review');
+  });
   it('collects compulsory details before inviting optional ones', () => {
     expect(
       getRequiredEventSection({ ...complete, description: undefined }),

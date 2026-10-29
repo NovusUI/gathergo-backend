@@ -1,10 +1,13 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IsString, IsOptional, IsBoolean, IsEnum } from 'class-validator';
+import type { MealCollectionDetails } from '../../food-bank/collection-policy';
+export type { MealCollectionDetails } from '../../food-bank/collection-policy';
 
 export enum ScanType {
   TICKET = 'ticket',
   REGISTRATION = 'registration',
   DONATION = 'donation',
+  MEAL = 'meal',
 }
 
 export class ScanDto {
@@ -63,6 +66,7 @@ export class ScanResultDto {
     scanLocation?: string;
     scannedBy?: string;
     qrCode: string;
+    mealCollection?: MealCollectionDetails;
   };
   error?: string;
 }
@@ -95,6 +99,7 @@ export class ValidationResultDto {
     status: string;
     isUsed: boolean;
     transactionId?: string;
+    mealCollection?: MealCollectionDetails;
   };
 }
 
@@ -107,4 +112,5 @@ export class QuickScanResultDto {
   userName?: string;
   eventDate?: Date;
   qrCode: string;
+  mealCollection?: MealCollectionDetails;
 }

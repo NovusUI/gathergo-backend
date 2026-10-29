@@ -1,15 +1,24 @@
-import { PaymentType, RiskStatus, SettlementStatus, TransactionStatusType } from '@prisma/client';
+import { DashboardRole, DashboardAccountStatus } from '@prisma/client';
+import {
+  PaymentType,
+  RiskStatus,
+  SettlementStatus,
+  TransactionStatusType,
+} from '@prisma/client';
 import { DashboardService } from './dashboard.service';
 
-describe('DashboardService', () => {
-  const originalOpsKey = process.env.INTERNAL_OPS_KEY;
+const dashboardAdmin = {
+  id: 'dashboard-admin',
+  role: DashboardRole.ADMIN,
+  status: DashboardAccountStatus.ACTIVE,
+  mustChangePassword: false,
+};
 
+describe('DashboardService', () => {
   let prisma: any;
   let service: DashboardService;
 
   beforeEach(() => {
-    process.env.INTERNAL_OPS_KEY = 'ops-secret';
-
     prisma = {
       event: {
         count: jest.fn(),
@@ -33,10 +42,6 @@ describe('DashboardService', () => {
     };
 
     service = new DashboardService(prisma);
-  });
-
-  afterAll(() => {
-    process.env.INTERNAL_OPS_KEY = originalOpsKey;
   });
 
   it('returns a platform overview for internal admin operations', async () => {
@@ -114,7 +119,7 @@ describe('DashboardService', () => {
       },
     ]);
 
-    const result = await service.getInternalOverview({}, 'ops-secret');
+    const result = await service.getInternalOverview({}, dashboardAdmin);
 
     expect(result.summary).toEqual({
       totalEvents: 18,

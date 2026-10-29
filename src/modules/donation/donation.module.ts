@@ -1,4 +1,5 @@
 // src/donation/donation.module.ts
+import { FoodBankModule } from '../food-bank/food-bank.module';
 import { Module } from '@nestjs/common';
 import { DonationService } from './donation.service';
 import { PrismaModule } from 'src/prisma/prisma.module';
@@ -8,7 +9,7 @@ import { FeedService } from '../feed/feed.service';
 import { MailModule } from '../mail/mail.module';
 
 @Module({
-  imports: [PrismaModule, NotificationModule, MailModule],
+  imports: [FoodBankModule, PrismaModule, NotificationModule, MailModule],
   providers: [DonationService, FeedIntegrationService, FeedService],
   exports: [DonationService],
 })

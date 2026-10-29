@@ -25,6 +25,7 @@ import { RespondRequestDto } from './dto/respond-request.dto';
 import { QueryCarpoolDto } from './dto/query-carpool.dto';
 import { ForYouCarpoolDto } from './dto/foryou-carpool.dto';
 import { EventCarpoolQueryDto } from './dto/event-carpool-query.dto';
+import { DashboardAccess } from 'src/modules/dashboard-auth/dashboard-access';
 
 @ApiTags('Carpool')
 @Controller('carpool')
@@ -61,6 +62,16 @@ export class CarpoolController {
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   async getActiveCarpools(@Query() query: QueryCarpoolDto) {
     return this.carpoolService.getActiveCarpools(query);
+  }
+
+  @Get('internal/event/:eventId/paginated')
+  @DashboardAccess('read')
+  @ApiOperation({ summary: 'Inspect event carpools with a dashboard account' })
+  getInternalEventCarpools(
+    @Param('eventId') eventId: string,
+    @Query() query: EventCarpoolQueryDto,
+  ) {
+    return this.carpoolService.getPaginatedEventCarpools(null, eventId, query);
   }
 
   @Get('event/:eventId/paginated')

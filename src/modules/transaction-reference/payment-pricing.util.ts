@@ -1,4 +1,79 @@
 import { PaymentProvider } from '@prisma/client';
+import type { Prisma, TransactionReference } from '@prisma/client';
+import { BadRequestException } from '@nestjs/common';
+
+type RecordedPayment = Pick<TransactionReference, 'amount' | 'metadata'>;
+
+function jsonObject(value: Prisma.JsonValue): Prisma.JsonObject | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value))
+    return undefined;
+  return value;
+}
+
+function recordedKobo(
+  metadata: Prisma.JsonValue,
+  key:
+    | 'grossAmountKobo'
+    | 'chargeAmountKobo'
+    | 'creatorPayableKobo'
+    | 'platformFeeKobo',
+) {
+  const record = jsonObject(metadata);
+  const pricing =
+    record?.pricing === undefined ? undefined : jsonObject(record.pricing);
+  const value = pricing?.[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
+    throw new BadRequestException(`Invalid recorded payment pricing: ${key}`);
+  return value;
+}
+
+export function resolveChargedAmountKobo(payment: RecordedPayment) {
+  return (
+    recordedKobo(payment.metadata, 'chargeAmountKobo') ??
+    (jsonObject(payment.metadata)?.amountUnit === 'KOBO'
+      ? payment.amount
+      : payment.amount * 100)
+  );
+}
+
+export function resolveGrossAmountKobo(payment: RecordedPayment) {
+  return (
+    recordedKobo(payment.metadata, 'grossAmountKobo') ??
+    resolveChargedAmountKobo(payment)
+  );
+}
+
+export function resolvePlatformFeeKobo(
+  payment: RecordedPayment & Pick<TransactionReference, 'platformFee'>,
+) {
+  return (
+    recordedKobo(payment.metadata, 'platformFeeKobo') ??
+    (payment.platformFee > 0
+      ? payment.platformFee
+      : calculatePlatformFeeKobo(resolveGrossAmountKobo(payment)))
+  );
+}
+
+export function resolveCreatorPayableKobo(
+  payment: RecordedPayment &
+    Pick<
+      TransactionReference,
+      'creatorPayable' | 'platformFee' | 'providerFee'
+    >,
+) {
+  return (
+    recordedKobo(payment.metadata, 'creatorPayableKobo') ??
+    (payment.creatorPayable > 0
+      ? payment.creatorPayable
+      : Math.max(
+          resolveGrossAmountKobo(payment) -
+            resolvePlatformFeeKobo(payment) -
+            payment.providerFee,
+          0,
+        ))
+  );
+}
 
 export type FeeBearer = 'BUYER' | 'CREATOR' | 'PLATFORM';
 
@@ -128,9 +203,12 @@ export function estimateProviderFeeKobo(
   }
 
   const rule = getProviderFeeRule(provider);
-  const percentageFee = Math.round((chargedAmountKobo * rule.percentageBps) / 10000);
+  const percentageFee = Math.round(
+    (chargedAmountKobo * rule.percentageBps) / 10000,
+  );
   const fixedFeeKobo =
-    rule.fixedFeeWaiverBelowKobo && chargedAmountKobo < rule.fixedFeeWaiverBelowKobo
+    rule.fixedFeeWaiverBelowKobo &&
+    chargedAmountKobo < rule.fixedFeeWaiverBelowKobo
       ? 0
       : rule.fixedFeeKobo;
   const uncappedFee = percentageFee + fixedFeeKobo;
@@ -169,10 +247,7 @@ export function getProviderFeeBearer(provider: PaymentProvider): FeeBearer {
       ? process.env.CHECKOUT_PROVIDER_FEE_BEARER
       : undefined;
 
-  return parseFeeBearer(
-    providerSpecificValue || sharedValue,
-    'BUYER',
-  );
+  return parseFeeBearer(providerSpecificValue || sharedValue, 'BUYER');
 }
 
 export function getPlatformFeeBearer(): FeeBearer {

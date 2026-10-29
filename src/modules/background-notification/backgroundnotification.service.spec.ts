@@ -81,6 +81,7 @@ describe('NotificationsService', () => {
     ['carpool_request', {}],
     ['carpool_accepted_request', {}],
     ['carpool_rejected_request', {}],
+    ['carpool_removed', {}],
     ['FEED_FRENZY_DONATION_HIGH', { isFrenzy: true }],
     ['FEED_DONATION_100_PERCENT', { isMilestone: true }],
     ['event_donation', {}],
