@@ -78,6 +78,21 @@ export class AuthService {
       where: { email: normalizedEmail },
     });
 
+    if (
+      existingUser?.isGuest &&
+      !existingUser.password &&
+      !existingUser.googleId
+    ) {
+      const pendingPasswordHash = await bcrypt.hash(dto.password, 12);
+      // A web participant already owns activity; email proof is required even when signup verification is disabled.
+      await this.issueEmailVerificationCode(existingUser, { pendingPasswordHash });
+      return {
+        message: 'Verify your email to finish signing up and keep your web activity.',
+        email: normalizedEmail,
+        requiresVerification: true,
+      };
+    }
+
     if (existingUser) {
       throw new ForbiddenException('Email already in use');
     }
@@ -138,11 +153,12 @@ export class AuthService {
       where: { email: normalizedEmail },
     });
 
-    if (!user || !this.isEmailPasswordUser(user)) {
+    const completingGuest = Boolean(user?.isGuest && user.pendingPasswordHash);
+    if (!user || (!this.isEmailPasswordUser(user) && !completingGuest)) {
       throw new BadRequestException('Invalid or expired verification code');
     }
 
-    if (user.isVerified) {
+    if (user.isVerified && !completingGuest) {
       return {
         message: 'Email is already verified. Please sign in.',
         email: normalizedEmail,
@@ -194,6 +210,13 @@ export class AuthService {
       data: {
         ...this.getClearedEmailVerificationState(),
         isVerified: true,
+        ...(completingGuest
+          ? {
+              password: user.pendingPasswordHash,
+              pendingPasswordHash: null,
+              isGuest: false,
+            }
+          : {}),
       },
     });
 
@@ -214,7 +237,8 @@ export class AuthService {
       where: { email: normalizedEmail },
     });
 
-    if (!user || !this.isEmailPasswordUser(user)) {
+    const completingGuest = Boolean(user?.isGuest && user.pendingPasswordHash);
+    if (!user || (!this.isEmailPasswordUser(user) && !completingGuest)) {
       return {
         message: 'If that email exists, a verification code has been sent.',
         email: normalizedEmail,
@@ -222,7 +246,7 @@ export class AuthService {
       };
     }
 
-    if (!this.isEmailVerificationRequired()) {
+    if (!this.isEmailVerificationRequired() && !completingGuest) {
       await this.prisma.user.update({
         where: { id: user.id },
         data: {
@@ -238,7 +262,7 @@ export class AuthService {
       };
     }
 
-    if (user.isVerified) {
+    if (user.isVerified && !completingGuest) {
       return {
         message: 'Email is already verified. Please sign in.',
         email: normalizedEmail,
@@ -287,6 +311,11 @@ export class AuthService {
       where: { email: normalizedEmail },
     });
 
+    if (user?.isGuest && !user.password) {
+      throw new ForbiddenException(
+        'Finish signing up with this email, or sign in with Google, to access your web activity.',
+      );
+    }
     if (user && !user.password) {
       throw new ForbiddenException(
         'This account uses Google login. Please sign in with Google',
@@ -630,7 +659,7 @@ export class AuthService {
 
   private async issueEmailVerificationCode(
     user: EmailPasswordUser,
-    options?: { ignoreCooldown?: boolean },
+    options?: { ignoreCooldown?: boolean; pendingPasswordHash?: string },
   ) {
     if (!user.email) {
       throw new InternalServerErrorException(
@@ -655,6 +684,9 @@ export class AuthService {
       where: { id: user.id },
       data: {
         emailVerificationCodeHash: this.hashValue(code),
+        ...(options?.pendingPasswordHash
+          ? { pendingPasswordHash: options.pendingPasswordHash }
+          : {}),
         emailVerificationCodeExpiry: expiry,
         emailVerificationSentAt: new Date(),
         emailVerificationAttempts: 0,
@@ -869,9 +901,7 @@ export class AuthService {
 
   private generateNumericCode(length: number) {
     const max = 10 ** length;
-    const code = crypto.randomInt(0, max).toString().padStart(length, '0')
-    console.log(code)
-    return code ;
+    return crypto.randomInt(0, max).toString().padStart(length, '0');
   }
 
   private isEmailVerificationRequired() {

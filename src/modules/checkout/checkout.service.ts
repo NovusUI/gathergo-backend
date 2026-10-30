@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import {
   CheckoutInitializationStatus,
+  PaymentProvider,
   PaymentType,
   Prisma,
   ReservationStatus,
@@ -19,6 +20,7 @@ import { isUUID } from 'class-validator';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { TicketService } from '../ticket/ticket.service';
 import { RegistrationService } from '../registration/registration.service';
+import { PaystackInitializedTransaction } from '../paystack/types/paystack-response.type';
 import {
   databaseNow,
   lockCheckoutEvent,
@@ -577,6 +579,14 @@ export class CheckoutService {
       transactionId: record.id,
       paymentProvider: record.paymentProvider,
       paymentUrl: payable ? record.paymentUrl : null,
+      // A ready, pending Paystack checkout stores the initialize response here.
+      paymentAccessCode:
+        payable &&
+        record.paymentProvider === PaymentProvider.PAYSTACK &&
+        record.initializationStatus === CheckoutInitializationStatus.READY
+          ? (record.providerPayload as PaystackInitializedTransaction)
+              .access_code
+          : null,
       paymentInstructions: payable
         ? (metadata.providerInstructions ?? null)
         : null,

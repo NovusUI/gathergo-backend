@@ -35,5 +35,6 @@ import { AlatCollectionService } from './alat-collection.service';
     FeedIntegrationService,
     FeedService,
   ],
+  exports: [TransactionReferenceService],
 })
 export class TransactionReferenceModule {}

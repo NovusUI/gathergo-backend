@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { PublicWebModule } from './modules/public-web/public-web.module';
 import { ShortLinksModule } from './modules/short-links/short-links.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -44,6 +45,7 @@ import { DashboardAuthModule } from './modules/dashboard-auth/dashboard-auth.mod
 
 @Module({
   imports: [
+    PublicWebModule,
     ConfigModule.forRoot({
       isGlobal: true, // <--- makes ConfigService available app-wide
       envFilePath: ['.env.local', '.env'],

@@ -14,6 +14,7 @@ export type PurchasedTicketItem = {
 };
 
 export type CheckoutMetadata = {
+  channel?: 'WEB';
   type: PaymentType;
   amountUnit: 'KOBO';
   eventId: string;

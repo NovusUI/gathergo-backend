@@ -168,6 +168,7 @@ export class RegistrationService {
 
   private async queueRegistrationConfirmationEmail(registration: {
     id: string;
+    transactionId: string;
     qrCode: string;
     event: {
       id: string;
@@ -198,7 +199,10 @@ export class RegistrationService {
         confirmationCode: registration.id,
         qrCode: registration.qrCode,
         showQrCode: false,
-        profileUrl: this.buildFrontendUrl(`/event/${registration.event.id}`),
+        profileUrl: new URL(
+          `/checkout/${registration.transactionId}`,
+          process.env.PUBLIC_WEB_ORIGIN || 'https://gathergo.events',
+        ).toString(),
       });
 
       if (result.skipped) {
@@ -214,17 +218,6 @@ export class RegistrationService {
       );
       throw error;
     }
-  }
-
-  private buildFrontendUrl(path: string) {
-    const baseUrl = process.env.FRONTEND_URL?.trim();
-    if (!baseUrl) {
-      return undefined;
-    }
-
-    const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
-    const normalizedPath = path.replace(/^\/+/, '');
-    return `${normalizedBaseUrl}/${normalizedPath}`;
   }
 
   private resolveDisplayName(user: {

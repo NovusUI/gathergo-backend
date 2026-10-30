@@ -218,6 +218,9 @@ export function validateEnvironment(config: Record<string, unknown>) {
     CHECKOUT_MAX_TICKETS: Joi.number().integer().min(1).max(100).default(4),
     SHADOW_DATABASE_URL: Joi.string().allow('').optional(),
     FRONTEND_URL: Joi.string().allow('').optional(),
+    PUBLIC_WEB_ORIGIN: Joi.string().uri({ scheme: [/https?/] }).optional(),
+    PUBLIC_PLAY_STORE_URL: Joi.string().uri({ scheme: ['https'] }).optional(),
+    PUBLIC_APP_STORE_URL: Joi.string().uri({ scheme: ['https'] }).optional(),
     CORS_ALLOWED_ORIGINS: Joi.string().allow('').optional(),
     DEEPSEEK_API_KEY: Joi.string().trim().allow('').optional(),
     DEEPSEEK_MODEL: Joi.string()

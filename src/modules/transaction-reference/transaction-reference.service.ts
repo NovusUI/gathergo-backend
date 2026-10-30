@@ -32,7 +32,6 @@ import {
 import { PrismaService } from 'src/prisma/prisma.service';
 import { DonationService } from '../donation/donation.service';
 import { PaystackService } from '../paystack/paystack.service';
-import { PaystackResponse } from '../paystack/types/paystack-response.type';
 import { RegistrationService } from '../registration/registration.service';
 import { TicketService } from '../ticket/ticket.service';
 import { AlatCollectionService } from './alat-collection.service';
@@ -153,6 +152,7 @@ export class TransactionReferenceService {
     email: string,
     dto: CreateTransactionReferenceDto,
     idempotencyKey: string,
+    context?: { channel: 'WEB' },
   ) {
     const provider = this.resolvePaymentProvider(dto.provider);
     const quantities = new Map<string, number>();
@@ -270,6 +270,7 @@ export class TransactionReferenceService {
 
     const metadata: CheckoutMetadata = {
       type: PaymentType.TICKET,
+      ...(context ? { channel: context.channel } : {}),
       amountUnit: 'KOBO',
       eventId: eventSummary.id,
       eventTitle: eventSummary.title,
@@ -314,6 +315,7 @@ export class TransactionReferenceService {
       sponsorshipNote?: string;
       provider?: PaymentProviderDto;
       clientContext?: PaymentClientContextDto;
+      channel?: 'WEB';
     },
   ) {
     const provider = this.resolvePaymentProvider(paymentOptions?.provider);
@@ -389,6 +391,7 @@ export class TransactionReferenceService {
     const metadata: CheckoutMetadata = {
       type: PaymentType.REGISTRATION,
       amountUnit: 'KOBO',
+      ...(paymentOptions?.channel ? { channel: paymentOptions.channel } : {}),
       eventId,
       eventTitle: event.title,
       pricing,
@@ -442,6 +445,7 @@ export class TransactionReferenceService {
         eventTitle: metadata.eventTitle,
         eventId: metadata.eventId,
         paymentType: record.paymentType!,
+        web: metadata.channel === 'WEB',
         creatorId: record.creatorId!,
         alatProfile,
       });
@@ -469,9 +473,27 @@ export class TransactionReferenceService {
     userId: string,
     email: string,
     dto: InitiateDonationDto,
+    context?: { channel: 'WEB'; idempotencyKey: string },
   ) {
     const { eventId, amount, message, isAnonymous } = dto;
     const provider = this.resolvePaymentProvider(dto.provider);
+
+    const requestHash = this.checkout.hashRequest({
+      type: PaymentType.DONATION,
+      eventId,
+      amount,
+      message: message ?? null,
+      isAnonymous: isAnonymous ?? false,
+      source: dto.source ?? null,
+    });
+    if (context) {
+      const replay = await this.checkout.findReplay(
+        userId,
+        context.idempotencyKey,
+        requestHash,
+      );
+      if (replay) return this.initializeCheckout(replay.id, email, null);
+    }
 
     const event = await this.prisma.event.findUnique({
       where: { id: eventId },
@@ -526,6 +548,7 @@ export class TransactionReferenceService {
 
     const metadata = {
       type: PaymentType.DONATION,
+      ...(context ? { channel: context.channel } : {}),
       ...(dto.source ? { source: dto.source } : {}),
       amountUnit: 'KOBO',
       eventId,
@@ -536,7 +559,7 @@ export class TransactionReferenceService {
       pricing,
     };
 
-    const transactionRef = await this.prisma.transactionReference.create({
+    const createTransaction = () => this.prisma.transactionReference.create({
       data: {
         userId,
         creatorId: event.creatorId,
@@ -548,6 +571,7 @@ export class TransactionReferenceService {
         creatorPayable: pricing.creatorPayableKobo,
         paymentProvider: provider,
         paymentType: PaymentType.DONATION,
+        ...(context ? { idempotencyKey: context.idempotencyKey, requestHash } : {}),
         settlementStatus: riskAssessment.settlementStatus,
         riskStatus: riskAssessment.riskStatus,
         riskScore: riskAssessment.riskScore,
@@ -555,6 +579,25 @@ export class TransactionReferenceService {
         metadata: this.asInputJson(metadata),
       },
     });
+
+    let transactionRef: Awaited<ReturnType<typeof createTransaction>>;
+    try {
+      transactionRef = await createTransaction();
+    } catch (error) {
+      if (
+        !context ||
+        !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+        error.code !== 'P2002'
+      ) throw error;
+      const replay = await this.checkout.findReplay(
+        userId,
+        context.idempotencyKey,
+        requestHash,
+      );
+      if (!replay) throw error;
+      return this.initializeCheckout(replay.id, email, null);
+    }
+    if (context) return this.initializeCheckout(transactionRef.id, email, null);
 
     const providerInitResponse = await this.initializeProviderPayment({
       provider,
@@ -1117,7 +1160,8 @@ export class TransactionReferenceService {
     if (transaction.userId !== userId)
       throw new NotFoundException('Transaction not found');
     if (
-      transaction.paymentType !== PaymentType.DONATION &&
+      (transaction.paymentType !== PaymentType.DONATION ||
+        this.getMetadataObject(transaction.metadata).channel === 'WEB') &&
       transaction.paymentProvider === PaymentProvider.PAYSTACK &&
       (transaction.initializationStatus === 'READY' ||
         transaction.providerReference !== null) &&
@@ -1134,7 +1178,9 @@ export class TransactionReferenceService {
           verified.data.reference !== id ||
           verified.data.currency !== 'NGN' ||
           !Number.isSafeInteger(verified.data.amount) ||
-          verified.data.amount <= 0
+          verified.data.amount <= 0 ||
+          (transaction.paymentType === PaymentType.DONATION &&
+            verified.data.amount !== transaction.amount)
         )
           throw new BadRequestException(
             'The verified payment does not match this checkout.',
@@ -1156,15 +1202,17 @@ export class TransactionReferenceService {
     }
 
     const checkout =
-      transaction.paymentType !== PaymentType.DONATION
+      transaction.paymentType !== PaymentType.DONATION ||
+      this.getMetadataObject(transaction.metadata).channel === 'WEB'
         ? await this.checkout.get(id)
         : null;
+    const checkoutState = checkout ? this.checkout.format(checkout) : null;
     return {
-      ...(checkout ? this.checkout.format(checkout) : {}),
+      ...checkoutState,
+      paymentUrl: checkoutState?.paymentUrl ?? null,
+      paymentAccessCode: checkoutState?.paymentAccessCode ?? null,
       id: transaction.id,
-      status: checkout
-        ? this.checkout.format(checkout).checkoutStatus
-        : transaction.status,
+      status: checkoutState?.checkoutStatus ?? transaction.status,
       refundStatus: checkout?.refund?.status ?? null,
       amount: transaction.amount,
       amountInNaira: transaction.amount / 100,
@@ -1381,6 +1429,7 @@ export class TransactionReferenceService {
       },
       transaction.userId,
       transaction.user.username ?? transaction.user.fullName ?? 'Someone',
+      { issueMealPass: metadata.channel !== 'WEB' },
     );
     metadata.donationId = donation.id;
     metadata.donationCreated = true;
@@ -1525,28 +1574,38 @@ export class TransactionReferenceService {
       businessId?: string | null;
       subaccountReference?: string | null;
     } | null;
+    web?: boolean;
   }): Promise<ProviderInitiationResult> {
     if (input.provider === PaymentProvider.PAYSTACK) {
-      const paymentInitResponse: PaystackResponse =
+      const paymentInitResponse =
         await this.paystackService.initializeTransaction({
           email: input.email,
           amount: input.amountKobo,
           reference: input.reference,
           callback_url:
-            process.env.PAYSTACK_CALLBACK_URL || 'https://yourcallback.com',
+            input.web
+              ? new URL(
+                  `/checkout/${input.reference}`,
+                  process.env.PUBLIC_WEB_ORIGIN || 'https://gathergo.events',
+                ).toString()
+              : process.env.PAYSTACK_CALLBACK_URL || 'https://yourcallback.com',
           metadata: {
             cancel_action:
-              process.env.PAYSTACK_CANCEL_URL || 'https://your-cancel-url.com',
+              input.web
+                ? new URL(
+                    `/checkout/${input.reference}?cancelled=1`,
+                    process.env.PUBLIC_WEB_ORIGIN || 'https://gathergo.events',
+                  ).toString()
+                : process.env.PAYSTACK_CANCEL_URL || 'https://your-cancel-url.com',
           },
         });
 
       return {
         message: paymentInitResponse.message,
         status: paymentInitResponse.status,
-        paymentUrl: paymentInitResponse.data?.authorization_url || null,
-        providerReference:
-          paymentInitResponse.data?.reference || input.reference,
-        providerPayload: paymentInitResponse.data || null,
+        paymentUrl: paymentInitResponse.data.authorization_url,
+        providerReference: paymentInitResponse.data.reference,
+        providerPayload: paymentInitResponse.data,
         instructions: null,
       };
     }

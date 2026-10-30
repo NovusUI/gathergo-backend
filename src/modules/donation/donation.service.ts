@@ -8,7 +8,10 @@ import {
 
 import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateDonationDto } from './dto/create-donation.dto';
-import { NotificationService } from '../notification/notification.service';
+import {
+  CreateNotificationData,
+  NotificationService,
+} from '../notification/notification.service';
 import { notificationConstants } from 'src/common/constants';
 import { FeedIntegrationService } from '../feed/feed-integration.service';
 import { FoodBankService } from '../food-bank/food-bank.service';
@@ -30,6 +33,7 @@ export class DonationService {
     createDonationDto: CreateDonationDto,
     userId: string,
     username: string,
+    options: { issueMealPass: boolean } = { issueMealPass: true },
   ) {
     const { eventId, amount, message, isAnonymous, transactionId } =
       createDonationDto;
@@ -51,7 +55,21 @@ export class DonationService {
       throw new BadRequestException('Minimum donation amount is ₦500');
     }
 
-    // Create donation in transaction to update total
+    const mealReminder: CreateNotificationData | null =
+      event.registrationType === 'foodbank' && !options.issueMealPass
+        ? {
+            recipientIds: [userId],
+            type: notificationConstants.EVENT_MEAL_CLAIM_REMINDER,
+            title: notificationConstants.EVENT_MEAL_CLAIM_REMINDER_TITLE,
+            message: notificationConstants.EVENT_MEAL_CLAIM_REMINDER_MESSAGE(
+              event.title,
+            ),
+            imageUrl: event.thumbnailUrl ?? undefined,
+            link: `/food-bank/${eventId}`,
+            data: { eventId, transactionId },
+          }
+        : null;
+
     const result = await this.prisma.$transaction(
       async (tx) => {
         // Serialize payment fulfillment so duplicate callbacks cannot duplicate a donation.
@@ -60,7 +78,8 @@ export class DonationService {
           where: { transactionId },
           include: { user: true, event: true },
         });
-        if (existing) return { donation: existing, created: false };
+        if (existing)
+          return { donation: existing, created: false, reminders: [] };
         const donation = await tx.donation.create({
           data: {
             userId,
@@ -90,14 +109,30 @@ export class DonationService {
           },
         });
 
-        if (event.registrationType === 'foodbank')
+        if (event.registrationType === 'foodbank' && options.issueMealPass)
           await this.foodBank.grantForDonation(tx, userId, eventId);
-        return { donation, created: true };
+        const reminders = mealReminder
+          ? await this.notificationService.storeNotification(mealReminder, tx)
+          : [];
+        return { donation, created: true, reminders };
       },
       { maxWait: 10000, timeout: 15000 },
     );
     const { donation: saved, created } = result;
     if (!created) return this.formatDonationResponse(saved);
+    if (mealReminder) {
+      try {
+        await this.notificationService.publishNotifications(
+          mealReminder,
+          result.reminders,
+        );
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Meal reminder stored for donation ${saved.id}; live delivery failed: ${reason}`,
+        );
+      }
+    }
     this.notificationService
       .createNotification({
         recipientIds: [event.creatorId],
@@ -219,6 +254,7 @@ export class DonationService {
         to: donation.user.email,
         name: this.resolveDisplayName(donation.user),
         amount: donation.amount / 100,
+        donationId: donation.id,
         currency: 'NGN',
         campaignTitle: donation.event.title,
         paymentMethod: transaction?.paymentProvider || 'Card',

@@ -75,6 +75,9 @@ model User {
   emailVerificationSentAt     DateTime?
   emailVerificationAttempts   Int                       @default(0)
   isVerified                  Boolean                   @default(false)
+  isGuest                     Boolean                   @default(false)
+  pendingPasswordHash          String?
+  webSessions                 WebSession[]
   fullName                    String?
   profilePicUrlTN             String?
   Carpool                     Carpool[]
@@ -116,6 +119,28 @@ model User {
   volunteerApplications       EventVolunteer[]          @relation("VolunteerUser")
   confirmedVolunteerWork      EventVolunteer[]          @relation("VolunteerConfirmer")
   badges                      UserBadge[]
+}
+
+model WebEmailChallenge {
+  id         String    @id @default(uuid())
+  email      String    @unique
+  codeHash   String
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  sentAt     DateTime  @default(now())
+  consumedAt DateTime?
+}
+
+model WebSession {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([expiresAt])
 }
 
 enum BadgeCode {

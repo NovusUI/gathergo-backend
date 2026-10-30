@@ -3,7 +3,7 @@ import axios from 'axios';
 import {
   PaystackBanksResponse,
   PaystackResolveAccountResponse,
-  PaystackResponse,
+  PaystackInitializedTransaction,
   PaystackResult,
   PaystackVerifiedTransaction,
   PaystackRefund,
@@ -21,24 +21,22 @@ export class PaystackService {
     metadata: {
       cancel_action: string;
     };
-  }): Promise<PaystackResponse> {
-    const res = await axios.post(
-      `${this.paystackBaseUrl}/transaction/initialize`,
-      data,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-          'Content-Type': 'application/json',
-        },
+  }): Promise<PaystackResult<PaystackInitializedTransaction>> {
+    const res = await axios.post<
+      PaystackResult<PaystackInitializedTransaction>
+    >(`${this.paystackBaseUrl}/transaction/initialize`, data, {
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        'Content-Type': 'application/json',
       },
-    );
+    });
     return res.data;
   }
 
   async verifyTransaction(
     reference: string,
   ): Promise<PaystackResult<PaystackVerifiedTransaction>> {
-    const res = await axios.get(
+    const res = await axios.get<PaystackResult<PaystackVerifiedTransaction>>(
       `${this.paystackBaseUrl}/transaction/verify/${reference}`,
       {
         timeout: 10000,
@@ -87,12 +85,15 @@ export class PaystackService {
   }
 
   async listBanks(country = 'nigeria'): Promise<PaystackBanksResponse> {
-    const res = await axios.get(`${this.paystackBaseUrl}/bank`, {
-      params: { country },
-      headers: {
-        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+    const res = await axios.get<PaystackBanksResponse>(
+      `${this.paystackBaseUrl}/bank`,
+      {
+        params: { country },
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        },
       },
-    });
+    );
     return res.data;
   }
 
@@ -101,15 +102,18 @@ export class PaystackService {
     bankCode: string;
   }): Promise<PaystackResolveAccountResponse> {
     console.log(input.bankCode, 'bank code');
-    const res = await axios.get(`${this.paystackBaseUrl}/bank/resolve`, {
-      params: {
-        account_number: input.accountNumber,
-        bank_code: input.bankCode,
+    const res = await axios.get<PaystackResolveAccountResponse>(
+      `${this.paystackBaseUrl}/bank/resolve`,
+      {
+        params: {
+          account_number: input.accountNumber,
+          bank_code: input.bankCode,
+        },
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        },
       },
-      headers: {
-        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-      },
-    });
+    );
     return res.data;
   }
 }

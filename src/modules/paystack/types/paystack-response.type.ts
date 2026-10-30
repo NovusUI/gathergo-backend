@@ -53,3 +53,8 @@ export type PaystackRefund = {
   currency: string;
 };
 export type PaystackResult<T> = Omit<PaystackResponse, 'data'> & { data: T };
+export type PaystackInitializedTransaction = {
+  authorization_url: string;
+  access_code: string;
+  reference: string;
+};

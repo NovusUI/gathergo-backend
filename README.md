@@ -468,3 +468,49 @@ stay with the existing web host. DNS and Apple/Android app-link association must
 cover the branded host and new path. No production migration or hosting change is
 performed by the implementation. Focused checks:
 `npm test -- --runInBand short-links` and `npm run build`.
+
+## Public event website
+
+The `public-web` module exposes public event and carpool previews at
+`/api/v1/public/events/:id` and `/api/v1/public/carpools/:id`. Email code request
+and verification endpoints establish opaque, 24-hour web sessions. These tokens
+work only with the public web endpoints, not native JWT APIs. Codes expire after
+10 minutes, permit five attempts, and have a database-enforced resend cooldown.
+No account-existence information is returned before email verification.
+
+Apply `20261029230000_public_web_participation` and regenerate Prisma before
+starting this backend version. Existing user IDs remain required on payments,
+passes, donations and volunteer applications. A verified first-time web visitor
+gets a guest participant identity; completing password signup requires another
+email proof, while verified Google sign-in links the same identity. No purchase
+or application history is copied or merged by an unverified email match.
+
+Guest tickets, registration, donations and volunteering use the existing services
+and capacity rules. Web checkout requires `Idempotency-Key`. The server snapshots
+the web channel, prices and payment return URL; clients cannot request meal
+issuance. Food-bank donations from the web produce donation receipts without meal
+passes. Native donations retain the single-entitlement allocation rules.
+
+After a verified web food-bank donation, the donor receives an unread meal-claim
+reminder linked to `/food-bank/:id`. It uses the same participant ID as the
+donation, so it remains in the notification tray after guest signup. Payment
+replays do not create another reminder. This notification does not allocate a meal.
+
+The owned public checkout receipt exposes `paymentAccessCode` for Paystack InlineJS
+and `paymentUrl` for hosted checkout while payment is available, including web
+donations. Both become null after completion or expiry. Popup callbacks prompt a
+receipt refresh; the server verifies payment with Paystack before issuing passes.
+
+Configure `PUBLIC_WEB_ORIGIN` for Paystack return/cancel URLs (defaults to
+`https://gathergo.events`). Configure the existing mail delivery/verification
+feature and worker before enabling guest completion. Optional
+`PUBLIC_PLAY_STORE_URL` and `PUBLIC_APP_STORE_URL` enable the website's store
+buttons. Add the public website origin to the existing CORS configuration when
+it uses a different API origin.
+
+Run the integration checks against a dedicated, migrated local database:
+`PUBLIC_WEB_TEST_DATABASE_URL=<local gathergo_public_web_test URL> npm test -- --runInBand public-web.integration.spec.ts`.
+`test/public-web-preview.ts` runs an isolated preview API on localhost:4011 with
+synthetic emails/payments; it rejects databases other than the dedicated local
+one. Start it with `node -r ts-node/register -r tsconfig-paths/register test/public-web-preview.ts`
+and the same test database variable. Production never imports this harness.

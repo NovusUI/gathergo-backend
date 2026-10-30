@@ -3,6 +3,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsEnum,
+  IsBoolean,
   IsNumber,
   IsOptional,
   IsString,
@@ -54,6 +55,7 @@ export class InitiateDonationDto {
     required: false,
   })
   @IsOptional()
+  @IsBoolean()
   isAnonymous?: boolean = false;
 
   @ApiPropertyOptional({

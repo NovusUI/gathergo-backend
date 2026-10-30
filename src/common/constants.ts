@@ -37,6 +37,11 @@ export const notificationConstants = {
   EVENT_DONATION_MESSAGE: (name: string, amount: number) =>
     `${name ?? 'A user '} just donated ${amount}`,
 
+  EVENT_MEAL_CLAIM_REMINDER: 'event_meal_claim_reminder',
+  EVENT_MEAL_CLAIM_REMINDER_TITLE: 'Claim a meal in GatherGo',
+  EVENT_MEAL_CLAIM_REMINDER_MESSAGE: (eventTitle: string) =>
+    `Meals are free; no donation is required. Claim or view your pass for ${eventTitle} in GatherGo, subject to availability. One pass per account.`,
+
   KYC_VERIFICATION_UPDATE: 'kyc_verification_update',
   KYC_VERIFICATION_UPDATE_TITLE: 'Verification update',
 };

@@ -27,7 +27,7 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
     done: VerifyCallback,
   ): Promise<any> {
     const { id, emails, displayName, photos } = profile;
-    const email = emails[0].value;
+    const email = emails[0].value.trim().toLowerCase();
 
     // Get redirect URL from query params (sent from mobile app)
     const redirectUrl =
@@ -68,6 +68,8 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
           where: { email },
           data: {
             googleId: id,
+            isGuest: false,
+            pendingPasswordHash: null,
             profilePicUrl: photos[0]?.value || user.profilePicUrl,
             password: null,
             isVerified: true,

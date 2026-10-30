@@ -1,5 +1,6 @@
 // notification.service.ts
 import { Injectable, Logger } from '@nestjs/common';
+import { Notification, Prisma } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { RedisPubSubService } from 'src/redis/redis.pubsub.service';
 import { RedisService } from 'src/redis/redis.service';
@@ -29,63 +30,70 @@ export class NotificationService {
 
   async createNotification(data: CreateNotificationData) {
     try {
-      // Create notifications in database
-      const notifications = await Promise.all(
-        data.recipientIds.map((recipientId) =>
-          this.prisma.notification.create({
-            data: {
-              recipientId,
-              type: data.type,
-              title: data.title,
-              message: data.message,
-              imageUrl: data.imageUrl,
-              link: data.link,
-              read: false,
-            },
-          }),
-        ),
-      );
-
-      // Increment unread counts in Redis for all recipients
-      await Promise.all(
-        data.recipientIds.map((recipientId) =>
-          this.redisService.client.incr(this.getUnreadCountKey(recipientId)),
-        ),
-      );
-
-      // Publish notifications to all recipients
-      await Promise.all(
-        notifications.map((notification) =>
-          this.redisPubSub.publishNotification({
-            recipientId: notification.recipientId,
-            notificationType: data.type,
-            data: {
-              id: notification.id,
-              title: notification.title,
-              message: notification.message,
-              imageUrl: notification.imageUrl ?? undefined,
-              link: notification.link,
-              createdAt: notification.createdAt,
-              read: notification.read,
-            },
-          }),
-        ),
-      );
-
-      await this.notificationsService.sendRegularNotification({
-        userIds: data.recipientIds,
-        title: data.title,
-        link: data.link,
-        message: data.message,
-        type: data.type,
-        data: data.data,
-      });
-
+      const notifications = await this.storeNotification(data);
+      await this.publishNotifications(data, notifications);
       return notifications;
     } catch (error) {
       this.logger.error('Failed to create notification', error.stack);
       throw error;
     }
+  }
+
+  async storeNotification(
+    data: CreateNotificationData,
+    client: Prisma.TransactionClient = this.prisma,
+  ) {
+    return Promise.all(
+      data.recipientIds.map((recipientId) =>
+        client.notification.create({
+          data: {
+            recipientId,
+            type: data.type,
+            title: data.title,
+            message: data.message,
+            imageUrl: data.imageUrl,
+            link: data.link,
+            read: false,
+          },
+        }),
+      ),
+    );
+  }
+
+  async publishNotifications(
+    data: CreateNotificationData,
+    notifications: Notification[],
+  ) {
+    await Promise.all(
+      data.recipientIds.map((recipientId) =>
+        this.redisService.client.incr(this.getUnreadCountKey(recipientId)),
+      ),
+    );
+    await Promise.all(
+      notifications.map((notification) =>
+        this.redisPubSub.publishNotification({
+          recipientId: notification.recipientId,
+          notificationType: data.type,
+          data: {
+            id: notification.id,
+            title: notification.title,
+            message: notification.message,
+            imageUrl: notification.imageUrl ?? undefined,
+            link: notification.link,
+            createdAt: notification.createdAt,
+            read: notification.read,
+          },
+        }),
+      ),
+    );
+    await this.notificationsService.sendRegularNotification({
+      userIds: data.recipientIds,
+      title: data.title,
+      link: data.link,
+      message: data.message,
+      type: data.type,
+      data: data.data,
+    });
   }
 
   async getNotificationsCursor(
